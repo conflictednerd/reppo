@@ -1,0 +1,14 @@
+# Granite-4.1-3B-Base, overlay on conf/math.yaml: no chat template, a plain "Question: ... Answer:" prompt with the
+# boxed instruction (no BOS: the tokenizer adds none). A new "\nQuestion:" ends the response (vLLM finish_reason "stop"
+# with a string stop_reason, which counts as EOS).
+policy_path: ibm-granite/granite-4.1-3b-base
+out_dir: ../outputs/llm/math_granite
+shm_dir: /dev/shm/reppo_llm/math_granite   # adapters published to vLLM each iteration
+pad_token: <|pad|>
+use_chat_template: false
+system_prompt: null
+user_template: "Question: {}\n\nPlease reason step by step, and put your final answer within \\boxed{{}}.\nAnswer:"
+stop_strings: ["\nQuestion:"]
+extra_stop_tokens: []
+gradient_checkpointing: 0.5   # the first half of the layers
+train_tokens: 8192

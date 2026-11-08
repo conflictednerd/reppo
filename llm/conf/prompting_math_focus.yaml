@@ -1,0 +1,9 @@
+# Prompting baseline, one emphasis per member: the base policy, no training; members 0-3 are each asked to emphasize
+# one descriptor (code, verification, symbols, markdown), member 4 the pair markdown and verification.
+iterations: 0
+member_prompts:
+  - "Solve the problem by writing Python code."
+  - "Verify your work as you go, and check your final answer, for example by substituting it back into the problem or solving it a second way."
+  - "Write the solution mostly in mathematical notation, using LaTeX, with as few words as possible."
+  - "Present the solution as a clearly structured markdown document, with headers and a bulleted or numbered list of steps."
+  - "Present the solution as a clearly structured markdown document, with headers and a bulleted or numbered list of steps. Verify your work as you go, and check your final answer, for example by substituting it back into the problem or solving it a second way."

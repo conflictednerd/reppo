@@ -1,0 +1,6 @@
+name: atari_boxing
+backend: atari
+env_id: Boxing-v5
+descriptor_set: atari_boxing
+repeat_action_probability: 0.25 # sticky actions, train and eval
+num_threads: 0 # envpool worker threads (0: envpool default); speed only

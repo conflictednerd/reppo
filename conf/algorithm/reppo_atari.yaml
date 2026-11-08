@@ -1,0 +1,52 @@
+_target_: src.algorithms.reppo.RePPO
+name: reppo_atari
+
+# CleanRL ppo_atari_envpool.py per member; total_timesteps is the population total
+# (10M agent steps per member at N=8).
+total_timesteps: 80_000_000
+lr_schedule_timesteps: null
+N: 8
+num_envs_per_policy: 8
+num_steps: 128
+
+learning_rate: 2.5e-4
+anneal_lr: true
+lr_anneal: linear
+gamma: 0.99
+gae_lambda: 0.95
+num_minibatches: 4 # minibatch 256/policy
+update_epochs: 4
+norm_adv: true
+clip_coef: 0.1
+clip_vloss: true
+ent_coef: 0.01
+vf_coef: 0.5
+max_grad_norm: 0.5
+scale_descriptor_returns: true
+
+hidden_dim: 512
+logstd_init: 0.0
+
+# CleanRL Atari agent: Nature CNN trunk, linear actor, task and descriptor critics.
+policy:
+  arch: cleanrl_atari
+
+K_nn: 7
+gamma_sq: 0.1
+beta_f: 0.9 # EMAs update only when a game ends
+beta_b: 0.9
+C_max: 1.0
+eps_f: 1.0
+eps_b: 1e-6
+
+repulsion_mode: symmetric
+use_exact_wk: false
+
+force_c_zero: false
+
+eval:
+  enabled: true
+  every_iters: 500
+  num_episodes: 4
+checkpoint_every_iters: null # only the final checkpoint is stored
+log_every_iters: 10

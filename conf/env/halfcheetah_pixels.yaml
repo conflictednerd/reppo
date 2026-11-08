@@ -1,0 +1,19 @@
+name: halfcheetah_pixels
+backend: brax
+env_id: halfcheetah
+descriptor_set: brax_halfcheetah_feet_contact
+normalize_obs: false # pixels are scaled by 1/255 inside the agent
+clip_obs: 10.0
+clip_reward: 10.0
+brax:
+  env_name: halfcheetah
+  physics_backend: mjx
+  episode_length: 1000
+  action_repeat: 1
+  env_kwargs: {}
+pixels:
+  enabled: true
+  image_size: 84
+  grayscale: true
+  frame_stack: 3
+  supersample: 2 # render at 168x168, average-pool to 84x84

@@ -1,0 +1,13 @@
+name: ant
+backend: brax
+env_id: ant
+descriptor_set: brax_ant_feet_contact
+normalize_obs: true
+clip_obs: 10.0
+clip_reward: 10.0
+brax:
+  env_name: ant
+  physics_backend: mjx
+  episode_length: 1000
+  action_repeat: 1
+  env_kwargs: {}

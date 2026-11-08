@@ -1,0 +1,13 @@
+name: walker2d
+backend: brax
+env_id: walker2d
+descriptor_set: brax_walker2d_feet_contact
+normalize_obs: true
+clip_obs: 10.0
+clip_reward: 10.0
+brax:
+  env_name: walker2d
+  physics_backend: mjx
+  episode_length: 1000
+  action_repeat: 1
+  env_kwargs: {}

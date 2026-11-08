@@ -1,0 +1,22 @@
+[project]
+name = "reppo-llm"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "vllm==0.30.0",
+    "peft",
+    "transformers",
+    "datasets",
+    "safetensors",
+    "numpy",
+    "pandas",
+    "omegaconf>=2.3.1",
+    "math-verify>=0.9.0",
+    "scikit-learn",
+]
+
+[tool.ruff]
+extend = "../pyproject.toml"
+
+[tool.ruff.lint.isort]
+known-first-party = ["reppo_llm"]

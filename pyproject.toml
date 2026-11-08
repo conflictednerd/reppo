@@ -1,0 +1,59 @@
+[project]
+name = "reppo"
+version = "0.1.0"
+description = "RePPO: Repulsive Population Policy Gradients for Behaviorally Diverse RL"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "torch==2.4.1",
+    "numpy>=1.26,<2.3",
+    "gymnasium[box2d]>=1.0.0",
+    "mujoco>=3.2",
+    "brax>=0.14,<0.15",
+    "jax[cuda12]>=0.5,<0.6; platform_system == 'Linux'",
+    "jax>=0.5,<0.6; platform_system != 'Linux'",
+    "hydra-core>=1.3.2",
+    "omegaconf>=2.3.0",
+    "pyyaml>=6.0",
+    "wandb>=0.18.0",
+    "tqdm>=4.66",
+    "ribs>=0.11.0",
+    "mujoco-warp==3.8.1",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6"]
+# PPGA imports its vendored pyribs 0.4 fork via a sys.path shim in
+# src/baselines/ppga/train.py; the installed `ribs` stays stock pyribs.
+ppga = [
+    "evotorch>=0.6",
+    "cma>=4.4",
+    "pandas>=2.0",
+    "semantic-version>=2.10",
+]
+pga_me = ["qdax>=0.5"]
+atari = ["envpool==1.2.7; python_version >= '3.12'"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["src/baselines/ppga/pyribs_vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B905"]

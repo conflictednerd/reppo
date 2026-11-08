@@ -1,0 +1,359 @@
+# ruff: noqa: E402
+import argparse
+import csv
+import os
+import shutil
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from src.baselines.ppga.compat import AttrDict, strtobool
+
+# PPGA is written against the vendored pyribs 0.4 fork; shadow any installed
+# stock ribs for this training process only.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "pyribs_vendor"))
+for _mod in [m for m in sys.modules if m == "ribs" or m.startswith("ribs.")]:
+    del sys.modules[_mod]
+
+from ribs.archives import GridArchive
+from ribs.schedulers import Scheduler
+
+from src.baselines.ppga.brax_vec_env import make_vec_env as make_vec_env_brax
+from src.baselines.ppga.emitters import PPGAEmitter
+from src.baselines.ppga.models.actor_critic import Actor
+from src.baselines.ppga.ppo import PPO
+from src.baselines.ppga.utils.utilities import get_checkpoints, log, save_cfg, set_file_handler
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    # PPO params
+    parser.add_argument('--env_name', type=str)
+    parser.add_argument('--seed', type=int, default=0)
+
+    # args for brax
+    parser.add_argument('--env_batch_size', default=1, type=int, help='Number of parallel environments to run')
+
+    # ppo hyperparams
+    parser.add_argument('--rollout_length', type=int, default=2048,
+                        help='the number of steps to run in each environment per policy rollout')
+    parser.add_argument('--learning_rate', type=float, default=3e-4)
+    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor for rewards')
+    parser.add_argument('--gae_lambda', type=float, default=0.95, help='Lambda discount used for general advantage est')
+    parser.add_argument('--num_minibatches', type=int, default=32)
+    parser.add_argument('--update_epochs', type=int, default=10, help='The K epochs to update the policy')
+    parser.add_argument("--norm_adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+                        help="Toggles advantages normalization")
+    parser.add_argument("--clip_coef", type=float, default=0.2,
+                        help="the surrogate clipping coefficient")
+    parser.add_argument("--clip_vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+                        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--clip_value_coef", type=float, default=0.2,
+                        help="value clipping coefficient")
+    parser.add_argument("--entropy_coef", type=float, default=0.0,
+                        help="coefficient of the entropy")
+    parser.add_argument("--vf_coef", type=float, default=0.5,
+                        help="coefficient of the value function")
+    parser.add_argument("--max_grad_norm", type=float, default=0.5,
+                        help="the maximum norm for the gradient clipping")
+    parser.add_argument("--target_kl", type=float, default=None,
+                        help="the target KL divergence threshold")
+    parser.add_argument('--normalize_obs', type=lambda x: bool(strtobool(x)), default=False,
+                        help='Normalize observations across a batch using running mean and stddev')
+    parser.add_argument('--normalize_returns', type=lambda x: bool(strtobool(x)), default=False,
+                        help='Normalize returns across a batch using running mean and stddev')
+    parser.add_argument('--value_bootstrap', type=lambda x: bool(strtobool(x)), default=False,
+                        help='Use bootstrap value estimates')
+    parser.add_argument('--clip_obs_rew', type=lambda x: bool(strtobool(x)), default=None, help='Override env yaml: clip obs and rewards b/w -10 and 10')
+
+    # QD Params
+    parser.add_argument("--num_emitters", type=int, default=1, help="Number of parallel"
+                                                                    " CMA-ES instances exploring the archive")
+    parser.add_argument('--grid_size', type=int, required=True, help='Number of cells per archive dimension')
+    parser.add_argument("--num_dims", type=int, required=True, help="Dimensionality of measures")
+    parser.add_argument("--popsize", type=int, required=True,
+                        help="Branching factor for each step of MEGA i.e. the number of branching solutions from the current solution point")
+    parser.add_argument('--log_arch_freq', type=int, default=10,
+                        help='Frequency in num iterations at which we checkpoint the archive')
+    parser.add_argument('--total_iterations', type=int, default=100,
+                        help='Number of iterations to run the entire dqd-rl loop')
+    parser.add_argument('--expdir', type=str, help='Experiment results directory')
+    parser.add_argument('--sigma0', type=float, default=1.0,
+                        help='Initial standard deviation parameter for the covariance matrix used in NES methods')
+    parser.add_argument('--restart_rule', type=str, choices=['basic', 'no_improvement'])
+    parser.add_argument('--calc_gradient_iters', type=int,
+                        help='Number of iters to run PPO when estimating the objective-measure gradients (N1)')
+    parser.add_argument('--move_mean_iters', type=int,
+                        help='Number of iterations to run PPO when moving the mean solution point (N2)')
+    parser.add_argument('--archive_lr', type=float, help='Archive learning rate for MAEGA')
+    parser.add_argument('--threshold_min', type=float, default=0.0,
+                        help='Min objective threshold for adding new solutions to the archive')
+    parser.add_argument('--physics_backend', type=str, default=None,
+                        help='Brax physics backend override (e.g. mjx, spring). Default: value from env yaml.')
+    parser.add_argument('--archive_descriptor_low', type=float, default=-1.0,
+                        help='Lower bound for archive behavior descriptor ranges')
+    parser.add_argument('--archive_descriptor_high', type=float, default=1.0,
+                        help='Upper bound for archive behavior descriptor ranges')
+    parser.add_argument('--map_descriptors_neg1_pos1', type=lambda x: bool(strtobool(x)), default=True,
+                        nargs='?', const=True,
+                        help='Map unit [0,1] contact descriptors to [-1,1] before archiving')
+    parser.add_argument('--adaptive_stddev', type=lambda x: bool(strtobool(x)), default=True,
+                        help='If False, the log stddev parameter in the actor will be reset on each QD iteration. Can potentially help exploration but may lose performance')
+
+    args = parser.parse_args()
+    cfg = AttrDict(vars(args))
+    return cfg
+
+
+def create_scheduler(cfg: AttrDict, initial_sol: np.ndarray = None):
+    '''Creates a scheduler that uses the ppga emitter
+        Args:
+        cfg (AttrDict): config file
+        initial_sol: initial solution (agent)
+    Returns:
+        ribs.schedulers.Scheduler: A ribs scheduler for running the algorithm.
+    '''
+    num_emitters = 1
+    obs_shape, action_shape = cfg.obs_shape, cfg.action_shape
+    action_dim, obs_dim = np.prod(action_shape), np.prod(obs_shape)
+    log.debug(f'Environment {cfg.env_name}, {action_dim=}, {obs_dim=}')
+    batch_size = cfg.popsize
+    qd_offset = 0.0
+
+    if initial_sol is None:
+        initial_agent = Actor(obs_shape, action_shape, cfg.normalize_obs, cfg.normalize_returns)
+        initial_sol = initial_agent.serialize()
+    solution_dim = len(initial_sol)
+    mode = 'batch'
+    threshold_min = cfg.threshold_min
+    archive_learning_rate = cfg.archive_lr
+
+    bounds = [(cfg.archive_descriptor_low, cfg.archive_descriptor_high)] * cfg.num_dims
+    archive_dims = [cfg.grid_size] * cfg.num_dims
+
+    archive = GridArchive(solution_dim=solution_dim,
+                          dims=archive_dims,
+                          ranges=bounds,
+                          learning_rate=archive_learning_rate,
+                          threshold_min=threshold_min,
+                          seed=cfg.seed,
+                          qd_offset=qd_offset)
+
+    result_archive = GridArchive(solution_dim=solution_dim,
+                                 dims=archive_dims,
+                                 ranges=bounds,
+                                 seed=cfg.seed,
+                                 qd_offset=qd_offset)
+
+    ppo = PPO(cfg)
+
+    # Create emitters. Each emitter needs a different seed, so that they do not
+    # all do the same thing.
+    emitter_seeds = [None] * num_emitters if cfg.seed is None else np.arange(
+        cfg.seed, cfg.seed + num_emitters)
+
+    emitters = [
+        PPGAEmitter(
+            ppo,
+            archive,
+            initial_sol,
+            sigma0=cfg.sigma0,
+            batch_size=batch_size,
+            ranker='imp',
+            restart_rule=cfg.restart_rule,
+            bounds=None,
+            seed=emitter_seeds[0],
+            normalize_obs=cfg.normalize_obs,
+            normalize_returns=cfg.normalize_returns,
+        )
+    ]
+
+    log.debug(
+        f"Created Scheduler for cma_maega with an archive learning rate of {archive_learning_rate}, "
+        f"and add mode {mode}, using solution dim {solution_dim} and archive "
+        f"dims {archive_dims}. Min threshold is {threshold_min}. Restart rule is {cfg.restart_rule}")
+
+    return Scheduler(archive, emitters, result_archive, add_mode=mode, reward_offset=qd_offset)
+
+
+def train_ppga(cfg: AttrDict, vec_env):
+    # setup logging
+    exp_dir = Path(cfg.outdir)
+    logdir = exp_dir.joinpath(Path('logs'))
+    if not logdir.is_dir():
+        logdir.mkdir()
+    set_file_handler(logdir)
+    save_cfg(str(exp_dir), cfg)
+
+    # checkpointing
+    cp_dir = exp_dir.joinpath(Path('checkpoints'))
+    if not cp_dir.is_dir():
+        cp_dir.mkdir()
+
+    # path to summary file
+    summary_filename = os.path.join(str(exp_dir), 'summary.csv')
+    with open(summary_filename, 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Iteration', 'QD-Score', 'Offset-QD-Score', 'Coverage', 'Maximum', 'Average'])
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    scheduler = create_scheduler(cfg)
+
+    result_archive = scheduler.result_archive
+    best = 0.0
+
+    obs_shape = cfg.obs_shape
+    action_shape = cfg.action_shape
+
+    ppo = scheduler.emitters[0].ppo
+
+    log_freq = 1
+    log_arch_freq = cfg.log_arch_freq
+
+    itrs = cfg.total_iterations
+    # main loop
+    for itr in range(itrs + 1):
+        # Current solution point. returns a single sol per emitter
+        solution_batch = scheduler.ask_dqd()
+        mean_agent = Actor(obs_shape, action_shape, cfg.normalize_obs, cfg.normalize_returns).deserialize(
+            solution_batch.flatten()).to(device)
+        # whether to reset the stddev param for the action distribution
+        if not cfg.adaptive_stddev:
+            mean_agent.actor_logstd = torch.nn.Parameter(torch.zeros(1, np.prod(cfg.action_shape)))
+
+        if cfg.normalize_obs:
+            if scheduler.emitters[0].mean_agent_obs_normalizer is not None:
+                mean_agent.obs_normalizer = scheduler.emitters[0].mean_agent_obs_normalizer
+
+        if cfg.normalize_returns:
+            if scheduler.emitters[0].mean_agent_return_normalizer is not None:
+                mean_agent.return_normalizer = scheduler.emitters[0].mean_agent_return_normalizer
+
+        ppo.agents = [mean_agent]
+        # calculate gradients of f and m
+        objs, measures, jacobian, metadata = ppo.train(vec_env=vec_env,
+                                                       num_updates=cfg.calc_gradient_iters,
+                                                       rollout_length=cfg.rollout_length,
+                                                       calculate_dqd_gradients=True,
+                                                       negative_measure_gradients=False)
+
+        best = max(best, max(objs))
+
+        # return the gradients to the scheduler. Will be used for the next step
+        scheduler.tell_dqd(objs, measures, jacobian, metadata)
+
+        # using grads from previous step, sample a batch of branched solution points and evaluate their f and m
+        branched_sols = scheduler.ask()
+        branched_agents = [
+            Actor(obs_shape, action_shape, cfg.normalize_obs, cfg.normalize_returns).deserialize(sol).to(device) for sol
+            in branched_sols]
+        for agent in branched_agents:
+            agent.actor_logstd.data = mean_agent.actor_logstd.data
+        ppo.agents = branched_agents
+
+        # since we branched from mean_agent, we will use its obs/return normalizer for the branched agents
+        # if obs/return normalization is enabled
+        eval_obs_normalizer = mean_agent.obs_normalizer if cfg.normalize_obs else None
+        eval_rew_normalizer = mean_agent.return_normalizer if cfg.normalize_returns else None
+
+        # evaluate the f and m of each branched agent
+        objs, measures, metadata = ppo.evaluate(ppo.vec_inference,
+                                                vec_env,
+                                                verbose=True,
+                                                obs_normalizer=eval_obs_normalizer,
+                                                return_normalizer=eval_rew_normalizer)
+
+        best = max(best, max(objs))
+
+        # return the evals to the scheduler. Will be used to update the search distribution in xnes
+        restarted = scheduler.tell(objs, measures, metadata)
+        if restarted:
+            log.debug("Emitter restarted. Changing the mean agent...")
+            mean_soln_point = scheduler.emitters[0].theta
+            mean_agent = Actor(obs_shape, action_shape, cfg.normalize_obs, cfg.normalize_returns).deserialize(
+                mean_soln_point).to(device)
+
+            # load the obs/return normalizer used for this agent
+            if cfg.normalize_obs and scheduler.emitters[0].mean_agent_obs_normalizer is not None:
+                mean_agent.obs_normalizer = scheduler.emitters[0].mean_agent_obs_normalizer
+            if cfg.normalize_returns and scheduler.emitters[0].mean_agent_return_normalizer is not None:
+                mean_agent.return_normalizer = scheduler.emitters[0].mean_agent_return_normalizer
+            if not cfg.adaptive_stddev:
+                mean_agent.actor_logstd = torch.nn.Parameter(torch.zeros(1, np.prod(cfg.action_shape)))
+
+        mean_grad_coeffs = scheduler.emitters[0].opt.mu  # keep track of where the emitter is taking us
+        mean_grad_coeffs = np.expand_dims(mean_grad_coeffs, axis=0).astype(np.float32)
+        log.info(f'New mean coefficients: {mean_grad_coeffs}')
+
+        # now we walk the solution point in the direction given by the new gradient coefficients
+        ppo.grad_coeffs = mean_grad_coeffs
+        ppo.agents = [mean_agent]
+        log.info('Moving the mean solution point...')
+        ppo.train(vec_env=vec_env,
+                  num_updates=cfg.move_mean_iters,
+                  rollout_length=cfg.rollout_length,
+                  calculate_dqd_gradients=False,
+                  move_mean_agent=True)
+
+        # get the resulting new mean solution point and update the scheduler
+        trained_mean_agent = ppo.agents[0]
+        scheduler.emitters[0].update_theta(trained_mean_agent.serialize())
+
+        # update the obs and return normalizers in the scheduler
+        if cfg.normalize_obs:
+            scheduler.emitters[0].mean_agent_obs_normalizer = trained_mean_agent.obs_normalizer
+        if cfg.normalize_returns:
+            scheduler.emitters[0].mean_agent_return_normalizer = trained_mean_agent.return_normalizer
+
+        # logging
+        log.debug(f'{itr=}, {itrs=}, Progress: {(100.0 * (itr / itrs)):.2f}%')
+
+        # Save the archive at the given frequency.
+        # Always save on the final iteration.
+        final_itr = itr == itrs
+        if (itr > 0 and itr % log_arch_freq == 0) or final_itr:
+            final_cp_dir = os.path.join(cp_dir, f'cp_{itr:08d}')
+            if not os.path.exists(final_cp_dir):
+                os.mkdir(final_cp_dir)
+            # Save a full archive for analysis.
+            df = result_archive.as_pandas(include_solutions=True, include_metadata=True)
+            df.to_pickle(os.path.join(final_cp_dir, f"archive_df_{itr:08d}.pkl"))
+
+        # save the top 2 checkpoints, delete older ones
+        while len(get_checkpoints(str(cp_dir))) > 2:
+            oldest_checkpoint = get_checkpoints(str(cp_dir))[0]
+            if os.path.exists(oldest_checkpoint):
+                log.info(f'Removing checkpoint {oldest_checkpoint}')
+                shutil.rmtree(oldest_checkpoint)
+
+        # Update the summary statistics for the archive
+        if (itr > 0 and itr % log_freq == 0) or final_itr:
+            with open(summary_filename, 'a') as summary_file:
+                writer = csv.writer(summary_file)
+                data = [itr, result_archive.stats.qd_score, result_archive.offset_qd_score,
+                        result_archive.stats.coverage, result_archive.stats.obj_max,
+                        result_archive.stats.obj_mean]
+                writer.writerow(data)
+
+
+if __name__ == '__main__':
+    cfg = parse_args()
+    cfg.num_emitters = 1
+
+    vec_env = make_vec_env_brax(cfg)
+    cfg.batch_size = int(cfg.env_batch_size * cfg.rollout_length)
+    cfg.num_envs = int(cfg.env_batch_size)
+
+    cfg.minibatch_size = int(cfg.batch_size // cfg.num_minibatches)
+    cfg.obs_shape = vec_env.single_observation_space.shape
+    cfg.action_shape = vec_env.single_action_space.shape
+
+    outdir = cfg.expdir
+    cfg.outdir = outdir
+    assert not os.path.exists(outdir), f"Warning: experiment dir {outdir} exists. Danger of overwriting previous run"
+    os.makedirs(outdir)
+
+    train_ppga(cfg, vec_env)

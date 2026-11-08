@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+.venv*/
+outputs/
+wandb/
+*.log
+.vscode/
+.idea/
+.DS_Store
+MUJOCO_LOG.TXT
+llm/data/

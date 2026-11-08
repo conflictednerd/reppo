@@ -1,0 +1,10 @@
+# Prompting baseline, hypercube corners: the base policy, no training; one style instruction per member at five corners
+# of the (code, verification, symbols, markdown) hypercube with even parity, so every pair of members differs on at
+# least two axes and each axis is split 3/2: (+,+,-,-), (+,-,-,+), (-,+,+,-), (-,-,+,+), (+,+,+,+).
+iterations: 0
+member_prompts:
+  - "Solve the problem by writing Python code, verify your answer with an explicit check, explain mostly in words, and write in flowing paragraphs without headers or bullet lists."
+  - "Solve the problem by writing Python code, do not add a separate verification step, explain mostly in words, and lay out the solution as a structured list of steps with markdown headers or bullet points."
+  - "Solve the problem by mathematical reasoning only, without any code, verify your answer with an explicit check, write mostly in mathematical notation, and write in flowing paragraphs without headers or bullet lists."
+  - "Solve the problem by mathematical reasoning only, without any code, do not add a separate verification step, write mostly in mathematical notation, and lay out the solution as a structured list of steps with markdown headers or bullet points."
+  - "Solve the problem by writing Python code, verify your answer with an explicit check, write mostly in mathematical notation, and lay out the solution as a structured list of steps with markdown headers or bullet points."

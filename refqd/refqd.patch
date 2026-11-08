@@ -1,0 +1,1022 @@
+diff --git a/refqd/config/root.py b/refqd/config/root.py
+index 14c2c3a..48f3211 100644
+--- a/refqd/config/root.py
++++ b/refqd/config/root.py
+@@ -107,6 +107,14 @@ def get_extra_overrides(overrides: dict[str, str]) -> dict[str, str]:
+         if 'multiseed' not in overrides:
+             extra_overrides['multiseed'] = 'vmap'
+ 
++    if (
++        overrides.get('task.full_game', 'False').lower() == 'true'
++        and 'task.episode_len' not in overrides.keys()
++    ):
++        extra_overrides['task.episode_len'] = str(
++            task.get_full_game_episode_len(overrides['task'])
++        )
++
+     if 'typ' in overrides.keys() and overrides['typ'] == 'dry':
+         if 'wandb' in overrides.keys():
+             assert overrides['wandb'] == 'False'
+diff --git a/refqd/config/task.py b/refqd/config/task.py
+index e1dad73..f9c6483 100644
+--- a/refqd/config/task.py
++++ b/refqd/config/task.py
+@@ -1,7 +1,7 @@
+ from hydra.core.config_store import ConfigStore
+ from omegaconf import MISSING
+ from dataclasses import dataclass
+-from typing import TypeVar
++from typing import Optional, TypeVar
+ 
+ 
+ @dataclass
+@@ -35,6 +35,7 @@ class RLTaskConfig(TaskConfig):
+     episode_len: int = 250
+     total_steps: int = 150_000_000
+     reduce_obs: bool = True
++    uint8_obs_buffer: bool = False
+ 
+ 
+ @dataclass
+@@ -132,6 +133,10 @@ class AtariConfig(EnvPoolConfig):
+     log_period: int = 2
+     reeval_period: int = 5
+     obs_shape: tuple[int, int] = (84, 84)
++    full_game_episode_len: int = MISSING
++    bd: str = 'refqd'
++    descriptor_set: Optional[str] = None
++    full_game: bool = False
+ 
+ 
+ @_register
+@@ -139,6 +144,7 @@ class AtariConfig(EnvPoolConfig):
+ class PongEnvConfig(AtariConfig):
+     name: str = 'Pong-v5'
+     episode_len: int = 2000
++    full_game_episode_len: int = 2000
+ 
+ 
+ @_register
+@@ -146,6 +152,35 @@ class PongEnvConfig(AtariConfig):
+ class BoxingEnvConfig(AtariConfig):
+     name: str = 'Boxing-v5'
+     episode_len: int = 1800
++    full_game_episode_len: int = 1800
++    descriptor_set: Optional[str] = 'atari_boxing'
++
++
++@_register
++@dataclass
++class AsterixEnvConfig(AtariConfig):
++    name: str = 'Asterix-v5'
++    episode_len: int = 1100
++    full_game_episode_len: int = 1600
++    descriptor_set: Optional[str] = 'atari_asterix'
++
++
++@_register
++@dataclass
++class MsPacmanEnvConfig(AtariConfig):
++    name: str = 'MsPacman-v5'
++    episode_len: int = 900
++    full_game_episode_len: int = 1600
++    descriptor_set: Optional[str] = 'atari_mspacman_order'
++
++
++@_register
++@dataclass
++class SeaquestEnvConfig(AtariConfig):
++    name: str = 'Seaquest-v5'
++    episode_len: int = 800
++    full_game_episode_len: int = 2400
++    descriptor_set: Optional[str] = 'atari_seaquest'
+ 
+ 
+ def register_configs(group: str) -> None:
+@@ -160,3 +195,9 @@ def register_configs(group: str) -> None:
+ 
+ def get_properties(name: str) -> dict[str, str]:
+     return _property[name]
++
++
++def get_full_game_episode_len(name: str) -> int:
++    cls = _configs[name]
++    assert issubclass(cls, AtariConfig)
++    return cls.full_game_episode_len
+diff --git a/refqd/export_eval.py b/refqd/export_eval.py
+new file mode 100644
+index 0000000..1b647ae
+--- /dev/null
++++ b/refqd/export_eval.py
+@@ -0,0 +1,406 @@
++'''Re-evaluate the archive of a RefQD Atari run (task.bd=ours) with the common protocol.
++
++Every filled cell becomes a policy (shared representation + its decision head). Each policy
++plays --num-episodes full games (one per env, distinct seeds) with a 27k-step cap; the score is
++the raw game score and the descriptor is the mean of the per-step RAM descriptors over the
++whole game, clipped to [-1, 1]. Writes <run-dir>/evaluation_results.json.
++
++    python -m refqd.export_eval --run-dir runs/<run>
++'''
++
++import jax
++import jax.numpy as jnp
++import qdax.core.emitters.multi_emitter
++from qdax.core.containers.mapelites_repertoire import MapElitesRepertoire
++
++import numpy as np
++import envpool
++from omegaconf import OmegaConf
++
++import argparse
++import json
++import os
++import pickle
++import time
++
++from .containers import ExtendedDepthRepertoire
++from .emitters import RefEmitterState
++from .metrics import qd_metrics
++from .neuroevolution import CNN, activation
++from .tasks import AtariTask
++from .tasks.atari_descriptors import ATARI_DESCRIPTORS
++from .utils import xz_read
++
++
++VENDI_BANDWIDTH = 0.5
++
++
++def vendi_score(descriptors: np.ndarray, sigma: float = 0.5) -> float:
++    n = descriptors.shape[0]
++    if n <= 1:
++        return float(n)
++    diff = descriptors[:, None, :] - descriptors[None, :, :]
++    kmat = np.exp(-(diff ** 2).sum(axis=-1) / (2.0 * sigma * sigma))
++    kmat = 0.5 * (kmat + kmat.T) / n
++    eigvals = np.clip(np.linalg.eigvalsh(kmat), 1e-12, None)
++    eigvals = eigvals / eigvals.sum()
++    return float(np.exp(-(eigvals * np.log(eigvals)).sum()))
++
++
++def summarize_population_results(
++    per_policy_returns: list[list[float]],
++    per_policy_descs: list[list[np.ndarray]],
++    per_policy_lengths: list[list[int]],
++    desc_names: list[str],
++    num_episodes: int,
++    n: int,
++    k: int,
++) -> dict:
++    results = {
++        'num_rollouts_per_policy': num_episodes,
++        'descriptor_names': desc_names,
++        'N': n,
++        'K': k,
++        'policies': [],
++    }
++    all_returns = []
++    all_descs = []
++
++    def _std(values: np.ndarray) -> float:
++        return float(values.std(ddof=1)) if len(values) > 1 else 0.0
++
++    def _sem(values: np.ndarray) -> float:
++        return _std(values) / float(np.sqrt(len(values))) if len(values) > 0 else 0.0
++
++    for i in range(n):
++        rets = np.array(per_policy_returns[i][:num_episodes], dtype=np.float64)
++        descs = np.stack(per_policy_descs[i][:num_episodes])
++        lens = np.array(per_policy_lengths[i][:num_episodes])
++        all_returns.append(rets)
++        all_descs.append(descs.mean(axis=0))
++
++        rollouts = [{
++            'rollout_idx': idx,
++            'return': float(rets[idx]),
++            'length': int(lens[idx]),
++            'behavior_descriptor': descs[idx].astype(float).tolist(),
++        } for idx in range(num_episodes)]
++
++        policy_result = {
++            'policy_idx': i,
++            'return_mean': float(rets.mean()),
++            'return_std': _std(rets),
++            'return_sem': _sem(rets),
++            'return_min': float(rets.min()),
++            'return_max': float(rets.max()),
++            'length_mean': float(lens.mean()),
++            'behavior_descriptor_mean': descs.mean(axis=0).astype(float).tolist(),
++            'behavior_descriptor_std': descs.std(axis=0, ddof=1).astype(float).tolist()
++            if len(descs) > 1
++            else np.zeros(k, dtype=float).tolist(),
++            'rollouts': rollouts,
++        }
++        for k_idx, dname in enumerate(desc_names):
++            policy_result[f'desc_{dname}_mean'] = float(descs[:, k_idx].mean())
++            policy_result[f'desc_{dname}_std'] = (
++                float(descs[:, k_idx].std(ddof=1)) if len(descs) > 1 else 0.0
++            )
++        results['policies'].append(policy_result)
++
++    all_rets_flat = np.concatenate(all_returns)
++    pop_descs = np.stack(all_descs)
++    policy_return_means = np.array([r.mean() for r in all_returns], dtype=np.float64)
++    best_idx = int(np.argmax(policy_return_means))
++    best_returns = all_returns[best_idx]
++
++    if n > 1:
++        dists = np.linalg.norm(pop_descs[:, None, :] - pop_descs[None, :, :], axis=-1)
++        avg_pairwise_distance = float(dists[np.triu_indices(n, k=1)].mean())
++    else:
++        avg_pairwise_distance = 0.0
++
++    results['population'] = {
++        'best_policy_idx': best_idx,
++        'best_policy_return_mean': float(best_returns.mean()),
++        'best_policy_return_std': _std(best_returns),
++        'best_policy_return_sem': _sem(best_returns),
++        'return_mean': float(all_rets_flat.mean()),
++        'return_std': _std(all_rets_flat),
++        'return_mean_all_rollouts': float(all_rets_flat.mean()),
++        'return_std_all_rollouts': _std(all_rets_flat),
++        'return_sem_all_rollouts': _sem(all_rets_flat),
++        'mean_policy_return_mean': float(policy_return_means.mean()),
++        'std_policy_return_mean': _std(policy_return_means),
++        'per_policy_return_means': [float(r.mean()) for r in all_returns],
++        'descriptor_means': pop_descs.astype(float).tolist(),
++        'avg_pairwise_behavior_distance': avg_pairwise_distance,
++        'vendi_score': vendi_score(pop_descs.astype(np.float32), sigma=VENDI_BANDWIDTH),
++        'vendi_bandwidth': VENDI_BANDWIDTH,
++    }
++    if n > 1:
++        results['population']['descriptor_spread'] = float(pop_descs.std(axis=0).mean())
++
++    return results
++
++
++def archive_metrics(fitnesses: jax.Array, qd_offset: float) -> dict[str, float]:
++    metrics = qd_metrics(MapElitesRepertoire(None, fitnesses, None, None), qd_offset)
++    return {key: float(value) for key, value in metrics.items()}
++
++
++def load_run(run_dir: str):
++    cfg = OmegaConf.load(os.path.join(run_dir, 'cfg.yaml'))
++    assert cfg.multiseed is None
++    assert cfg.task.bd == 'ours'
++    saved = pickle.loads(xz_read(os.path.join(run_dir, cfg.compressed_checkpoint_filename)))
++    state = saved['state']
++
++    emitter_state = state.emitter_state
++    while isinstance(emitter_state, qdax.core.emitters.multi_emitter.MultiEmitterState):
++        emitter_state = emitter_state.emitter_states[0]
++    assert isinstance(emitter_state, RefEmitterState)
++    if emitter_state.emitted_representation_params is not None:
++        representation_params = emitter_state.emitted_representation_params
++    else:
++        representation_params = emitter_state.representation_params
++
++    repertoire = state.repertoire
++    if isinstance(repertoire, ExtendedDepthRepertoire):
++        global_genotypes = saved['$extended_depth_repertoire.global_genotypes']
++    else:
++        global_genotypes = saved['$extended_me_repertoire.global_genotypes']
++    handle = int(np.asarray(repertoire.genotypes).flatten()[0])
++    cells = np.flatnonzero(np.isfinite(np.asarray(repertoire.fitnesses)))
++    heads = jax.tree_map(lambda x: np.asarray(x)[cells], global_genotypes[handle])
++    return cfg, representation_params, heads, cells, repertoire
++
++
++def build_nets(cfg, task: AtariTask) -> tuple[CNN, CNN]:
++    net_cfg = cfg.network
++    assert net_cfg.emitter_type == 'Share'
++    representation_net = CNN(
++        conv_features=net_cfg.representation_conv_features,
++        conv_kernel_sizes=net_cfg.representation_conv_kernel_sizes,
++        conv_activation=activation(net_cfg.conv_activation),
++        conv_strides=net_cfg.representation_conv_strides,
++        conv_padding=net_cfg.conv_padding,
++        mlp_layer_sizes=net_cfg.representation_mlp_hidden_layer_sizes,
++        mlp_activation=activation(net_cfg.mlp_activation),
++        mlp_final_activation=activation(net_cfg.mlp_final_activation),
++        cnn_input_shape=task.obs_space.shape,
++    )
++    decision_net = CNN(
++        conv_features=net_cfg.conv_features,
++        conv_kernel_sizes=net_cfg.conv_kernel_sizes,
++        conv_activation=activation(net_cfg.conv_activation),
++        conv_strides=net_cfg.conv_strides,
++        conv_padding=net_cfg.conv_padding,
++        mlp_layer_sizes=(*net_cfg.mlp_hidden_layer_sizes, int(task.action_space.n)),
++        mlp_activation=activation(net_cfg.mlp_activation),
++        mlp_final_activation=activation(net_cfg.mlp_final_activation),
++        cnn_input_shape=net_cfg.decision_cnn_input_shape,
++    )
++    return representation_net, decision_net
++
++
++def play_games(
++    env_name: str,
++    select_action_fn,
++    representation_params,
++    heads,
++    descriptor_fn,
++    num_episodes: int,
++    seed: int,
++    sticky: float,
++    max_episode_steps: int,
++    k: int,
++    max_rest: int = 256,
++):
++    """Play the first full game of every env; env i uses env seed seed + i.
++
++    Once at most max_rest games are unfinished, only those are replayed from reset in a small pool (same env seeds)
++    instead of stepping every env until the longest game ends. The policy input keeps the full chunk shape, so the
++    replayed games take the same actions. At the step where the first pass stopped, the replayed games must match it
++    (emulator RAM, returns and descriptor sums); on any difference the chunk is played again without the replay.
++    """
++    n_cells = jax.tree_util.tree_leaves(heads)[0].shape[0]
++    n_envs = n_cells * num_episodes
++    env_seeds = np.arange(seed, seed + n_envs)
++    returns = np.zeros(n_envs)
++    lengths = np.zeros(n_envs, dtype=np.int64)
++    desc_sums = np.zeros((n_envs, k))
++    finished = np.zeros(n_envs, dtype=bool)
++    full_obs = None
++    ids = np.arange(n_envs)
++    for phase in (1, 2):
++        env = envpool.make_gymnasium(
++            env_name,
++            num_envs=len(ids),
++            seed=int(env_seeds[ids[0]]),
++            env_seed=env_seeds[ids].tolist(),
++            img_height=84,
++            img_width=84,
++            stack_num=1,
++            episodic_life=True,
++            repeat_action_probability=sticky,
++            max_episode_steps=max_episode_steps,
++        )
++        obs, info = env.reset()
++        prev_ram = info['ram']
++        returns[ids] = 0
++        lengths[ids] = 0
++        desc_sums[ids] = 0
++        done = np.zeros(len(ids), dtype=bool)
++        step = 0
++        while not done.all():
++            x = np.moveaxis(np.divide(obs, np.float32(255.0), dtype=np.float32), -3, -1).reshape(len(ids), -1)
++            if full_obs is None:
++                full_obs = x
++            else:
++                full_obs[ids] = x
++            action = np.asarray(
++                select_action_fn(representation_params, heads, full_obs.reshape(n_cells, num_episodes, -1))
++            ).reshape(-1)[ids]
++            obs, _, _, trunc, info = env.step(action)
++            game_over = info['terminated'].astype(bool) | trunc
++            desc = descriptor_fn(info['ram'], prev_ram, action)
++            prev_ram = info['ram']
++            active = ~done
++            returns[ids[active]] += info['reward'][active]
++            lengths[ids[active]] += 1
++            desc_sums[ids[active]] += desc[active]
++            done |= game_over
++            step += 1
++            if phase == 1 and n_envs > 2 * max_rest and 0 < (~done).sum() <= max_rest:
++                break
++            if phase == 2 and step == stop_step:
++                replay_ok = (
++                    not done.any()
++                    and np.array_equal(prev_ram, stop_ram)
++                    and np.array_equal(returns[ids], stop_returns)
++                    and np.array_equal(desc_sums[ids], stop_desc_sums)
++                )
++                if not replay_ok:
++                    break
++        del env
++        if phase == 2 and not replay_ok:
++            print('replay differs from the first pass, playing the chunk without replay', flush=True)
++            return play_games(
++                env_name, select_action_fn, representation_params, heads, descriptor_fn, num_episodes, seed,
++                sticky, max_episode_steps, k, max_rest=0,
++            )
++        finished[ids] = done
++        if finished.all():
++            break
++        ids = np.flatnonzero(~finished)
++        stop_step, stop_ram = step, prev_ram[~done].copy()
++        stop_returns, stop_desc_sums = returns[ids].copy(), desc_sums[ids].copy()
++        replay_ok = False
++    descs = np.clip(desc_sums / lengths[:, None], -1.0, 1.0).astype(np.float32)
++    shape = (n_cells, num_episodes)
++    return returns.reshape(shape), descs.reshape(*shape, k), lengths.reshape(shape)
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
++    ap.add_argument('--run-dir', required=True)
++    ap.add_argument('--num-episodes', type=int, default=32)
++    ap.add_argument('--cells-per-chunk', type=int, default=64)
++    ap.add_argument('--seed', type=int, default=None, help='defaults to run seed + 1000')
++    ap.add_argument('--repeat-action-probability', type=float, default=0.0)
++    ap.add_argument('--max-episode-steps', type=int, default=27000)
++    args = ap.parse_args()
++
++    cfg, representation_params, heads, cells, repertoire = load_run(args.run_dir)
++    task = AtariTask(cfg.task, (1,))
++    representation_net, decision_net = build_nets(cfg, task)
++    desc_names, descriptor_fn = ATARI_DESCRIPTORS[cfg.task.descriptor_set]
++    k = len(desc_names)
++    seed = args.seed if args.seed is not None else int(cfg.seed[0]) + 1000
++
++    @jax.jit
++    def select_action_fn(representation_params, heads, obs):
++        representation = representation_net.apply(representation_params, obs)
++        q = jax.vmap(decision_net.apply)(heads, representation)
++        return jnp.argmax(q, axis=-1)
++
++    returns, descs, lengths = [], [], []
++    n_chunks = -(-len(cells) // args.cells_per_chunk)
++    for chunk in range(n_chunks):
++        start = chunk * args.cells_per_chunk
++        stop = min(start + args.cells_per_chunk, len(cells))
++        t = time.monotonic()
++        r, d, n = play_games(
++            task.env_name,
++            select_action_fn,
++            representation_params,
++            jax.tree_map(lambda x: x[start:stop], heads),
++            descriptor_fn,
++            args.num_episodes,
++            seed + start * args.num_episodes,
++            args.repeat_action_probability,
++            args.max_episode_steps,
++            k,
++        )
++        returns.extend(r)
++        descs.extend(d)
++        lengths.extend(n)
++        print(
++            f'chunk {chunk + 1}/{n_chunks}: cells {start}-{stop - 1}, '
++            f'mean score {r.mean():.1f}, mean length {n.mean():.0f}, {time.monotonic() - t:.0f}s',
++            flush=True,
++        )
++
++    n = len(cells)
++    results = summarize_population_results(
++        [list(r) for r in returns],
++        [list(d) for d in descs],
++        [list(x) for x in lengths],
++        list(desc_names),
++        args.num_episodes,
++        n,
++        k,
++    )
++    train_fitnesses = np.asarray(repertoire.fitnesses)
++    train_descriptors = np.asarray(repertoire.descriptors)
++    for policy, cell in zip(results['policies'], cells):
++        policy['cell_idx'] = int(cell)
++        policy['train_fitness'] = float(train_fitnesses[cell])
++        policy['train_descriptor'] = train_descriptors[cell].astype(float).tolist()
++
++    fitnesses = jnp.asarray(results['population']['per_policy_return_means'], dtype=jnp.float32)
++    eval_repertoire = MapElitesRepertoire.init(
++        genotypes=jnp.arange(n, dtype=jnp.float32),
++        fitnesses=fitnesses,
++        descriptors=jnp.asarray(results['population']['descriptor_means'], dtype=jnp.float32),
++        centroids=jnp.asarray(repertoire.centroids),
++    )
++    results['archive'] = {
++        'n_centroids': int(repertoire.centroids.shape[0]),
++        'qd_offset': task.qd_offset,
++        'eval': archive_metrics(eval_repertoire.fitnesses, task.qd_offset),
++        'train': archive_metrics(jnp.asarray(train_fitnesses), task.qd_offset),
++    }
++
++    results['run_dir'] = args.run_dir
++    results['env_id'] = task.env_name
++    results['descriptor_set'] = cfg.task.descriptor_set
++    results['seed'] = seed
++    results['envs_per_policy'] = args.num_episodes
++    results['repeat_action_probability'] = args.repeat_action_probability
++
++    output_file = os.path.join(args.run_dir, 'evaluation_results.json')
++    with open(output_file, 'w') as f:
++        json.dump(results, f, indent=2)
++    pop = results['population']
++    print(
++        f'best policy {pop["best_policy_idx"]}: {pop["best_policy_return_mean"]:.1f}, '
++        f'mean {pop["mean_policy_return_mean"]:.1f}, vendi {pop["vendi_score"]:.3f}\n'
++        f'archive eval {results["archive"]["eval"]}\n'
++        f'archive train {results["archive"]["train"]}\n'
++        f'saved -> {output_file}'
++    )
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/refqd/manager.py b/refqd/manager.py
+index 6bff968..708eb09 100644
+--- a/refqd/manager.py
++++ b/refqd/manager.py
+@@ -370,6 +370,8 @@ class Manager(ManagerBase[RootConfig, ManagerState, ManagerConstant]):
+                 return (
+                     *super()._saved_keys,
+                     '$extended_me_repertoire.global_genotypes',
++                    '$extended_depth_repertoire.global_genotypes',
++                    '$extended_depth_repertoire.global_genotypes_depth',
+                     '$buffers.global_buffer_data',
+                     'history',
+                 )
+@@ -389,6 +391,8 @@ class Manager(ManagerBase[RootConfig, ManagerState, ManagerConstant]):
+                 )
+         try:
+             del saved_dict['$extended_me_repertoire.global_genotypes']
++            del saved_dict['$extended_depth_repertoire.global_genotypes']
++            del saved_dict['$extended_depth_repertoire.global_genotypes_depth']
+             del saved_dict['$buffers.global_buffer_data']
+         except KeyError:
+             pass
+diff --git a/refqd/neuroevolution/buffers.py b/refqd/neuroevolution/buffers.py
+index 45d53bd..d51fddc 100644
+--- a/refqd/neuroevolution/buffers.py
++++ b/refqd/neuroevolution/buffers.py
+@@ -20,7 +20,7 @@ if TYPE_CHECKING:
+ _log = logging.getLogger(__name__)
+ 
+ 
+-global_buffer_data: list[np.ndarray] = []
++global_buffer_data: list[np.ndarray | tuple[np.ndarray, np.ndarray]] = []
+ global_restore_fn: list[Callable[[np.ndarray], np.ndarray]] = []
+ global_time_restore: float = 0.0
+ global_time_insert: float = 0.0
+@@ -39,14 +39,37 @@ def _update_global_buffer_data(
+     global global_time_insert
+     global_time_insert -= time.monotonic()
+     global_idx = int(fake_data.flatten()[0])
+-    replace_all = flattened_transitions.shape[-2] == global_buffer_data[global_idx].shape[-2]
++    buffer_data = global_buffer_data[global_idx]
++    uint8_obs = isinstance(buffer_data, tuple)
++    if uint8_obs:
++        uint8_dim = buffer_data[0].shape[-1]
++        buffer_data = buffer_data[0]
++    replace_all = flattened_transitions.shape[-2] == buffer_data.shape[-2]
++    del buffer_data
+     if replace_all:
+         global_buffer_data[global_idx] = None  # type: ignore
+     global_time_restore -= time.monotonic()
+     flattened_transitions = global_restore_fn[global_idx](flattened_transitions)
+     global_time_restore += time.monotonic()
++    if uint8_obs:
++        obs = np.empty((*flattened_transitions.shape[:-1], uint8_dim), dtype=np.uint8)
++        for i in range(0, obs.shape[-2], 4096):
++            obs[..., i:i + 4096, :] = np.rint(
++                flattened_transitions[..., i:i + 4096, :uint8_dim] * np.float32(255)
++            )
++        flattened_transitions = (obs, flattened_transitions[..., uint8_dim:].copy())
++        del obs
+     if replace_all:
+         global_buffer_data[global_idx] = flattened_transitions
++    elif uint8_obs:
++        global_buffer_data[global_idx] = tuple(
++            _do_update_global_buffer_data(
++                data,
++                transitions,
++                roll.flatten()[0],
++                new_position.flatten()[0],
++            ) for data, transitions in zip(global_buffer_data[global_idx], flattened_transitions)
++        )
+     else:
+         global_buffer_data[global_idx] = _do_update_global_buffer_data(
+             global_buffer_data[global_idx],
+@@ -78,9 +101,14 @@ def _take_from_global_buffer(data: np.ndarray, idx: np.ndarray):
+     global global_time_sample
+     global_time_sample -= time.monotonic()
+     global_idx = int(data.flatten()[0])
+-    taken = np.vectorize(np.take, excluded=('axis', 'mode'), signature='(i,j),(k)->(k,j)')(
+-        global_buffer_data[global_idx], idx, axis=-2, mode='clip'
+-    )
++    take = np.vectorize(np.take, excluded=('axis', 'mode'), signature='(i,j),(k)->(k,j)')
++    buffer_data = global_buffer_data[global_idx]
++    if isinstance(buffer_data, tuple):
++        obs = take(buffer_data[0], idx, axis=-2, mode='clip')
++        obs = np.divide(obs, np.float32(255), dtype=np.float32)
++        taken = np.concatenate((obs, take(buffer_data[1], idx, axis=-2, mode='clip')), axis=-1)
++    else:
++        taken = take(buffer_data, idx, axis=-2, mode='clip')
+     global_time_sample += time.monotonic()
+     return taken
+ 
+@@ -107,9 +135,19 @@ class CPUReplayBuffer(buffer.ReplayBuffer):
+             shape = data.shape
+             global_idx = len(global_buffer_data)
+             _log.info(f'init.onp_fn: {global_idx}')
+-            data = np.zeros(
+-                (*data.shape[:-2], buffer_size, transition.flatten_dim), dtype=np.float32
+-            )
++            if task.uint8_obs_buffer:
++                uint8_dim = 2 * transition.observation_dim
++                data = (
++                    np.zeros((*data.shape[:-2], buffer_size, uint8_dim), dtype=np.uint8),
++                    np.zeros(
++                        (*data.shape[:-2], buffer_size, transition.flatten_dim - uint8_dim),
++                        dtype=np.float32,
++                    ),
++                )
++            else:
++                data = np.zeros(
++                    (*data.shape[:-2], buffer_size, transition.flatten_dim), dtype=np.float32
++                )
+             global_buffer_data.append(data)
+             global_restore_fn.append(task.onp_restore_transitions)
+             return np.full(shape, global_idx, dtype=np.float32)
+diff --git a/refqd/tasks/atari_descriptors.py b/refqd/tasks/atari_descriptors.py
+new file mode 100644
+index 0000000..7efe7de
+--- /dev/null
++++ b/refqd/tasks/atari_descriptors.py
+@@ -0,0 +1,82 @@
++"""Atari descriptors computed from the 128-byte console RAM (envpool ``info["ram"]``).
++
++Each function maps ``(ram, prev_ram, action)``, this and the previous step's RAM (uint8,
++``(B, 128)``) and the actions taken (``(B,)``), to per-step cumulants of shape ``(B, 2)``.
++The episodic descriptor is the mean of the cumulants over every agent step of the full game
++(all lives), clipped to ``[-1, 1]``; frozen frames (death animations, ready pauses, level
++transitions) emit 0 but still count in the mean.
++
++Dense descriptors (Boxing, Asterix, Seaquest) are position-like and clipped per step. The
++clearing-order descriptor (Ms. Pac-Man) fires only when a dot is eaten: ``d = scale * w * s``
++with ``w = 1 - 2k/(n - 1)`` for the k-th of n dots in the level (so ``w`` sums to 0 over a
++full level and only the clearing order counts) and ``s`` the sign of the eaten dot's half.
++``scale`` puts the range reached by trained policies near +-1 after averaging over all game
++steps, so it is not clipped per step.
++"""
++
++from __future__ import annotations
++
++import numpy as np
++
++
++def boxing(ram: np.ndarray, prev_ram: np.ndarray, action: np.ndarray) -> np.ndarray:
++    """(horizontal distance to the opponent, ring height: mean y of both boxers)."""
++    # Trained boxers stand 25-55 px apart; 28 px is punching range.
++    distance_center, distance_scale = 38.0, 26.0
++    height_center, height_scale = 45.0, 44.0
++    ram = ram.astype(np.float32)
++    distance = (np.abs(ram[:, 32] - ram[:, 33]) - distance_center) / distance_scale
++    height = ((ram[:, 34] + ram[:, 35]) / 2.0 - height_center) / height_scale
++    return np.clip(np.stack([distance, height], axis=1), -1.0, 1.0)
++
++
++def asterix(ram: np.ndarray, prev_ram: np.ndarray, action: np.ndarray) -> np.ndarray:
++    """(player x, lane 0 top .. 7 bottom); 0 during death animations and wave interstitials."""
++    x_center, x_scale = 76.0, 52.0
++    lane_center, lane_scale = 3.5, 3.5
++    live = (ram[:, 71] == 0) & (ram[:, 2] == 100)
++    ram = ram.astype(np.float32)
++    x = (ram[:, 41] - x_center) / x_scale
++    lane = (ram[:, 39] - lane_center) / lane_scale
++    return np.clip(np.stack([x, lane], axis=1), -1.0, 1.0) * live[:, None]
++
++
++def seaquest(ram: np.ndarray, prev_ram: np.ndarray, action: np.ndarray) -> np.ndarray:
++    """(submarine x, depth); 0 while surfaced."""
++    x_center, x_scale = 77.5, 56.5
++    depth_center, depth_scale = 60.5, 47.5
++    surface_y = 13
++    submerged = ram[:, 97] > surface_y
++    ram = ram.astype(np.float32)
++    x = (ram[:, 70] - x_center) / x_scale
++    depth = (ram[:, 97] - depth_center) / depth_scale
++    return np.clip(np.stack([x, depth], axis=1), -1.0, 1.0) * submerged[:, None]
++
++
++def mspacman(ram: np.ndarray, prev_ram: np.ndarray, action: np.ndarray) -> np.ndarray:
++    """Clearing order (+x: right half first, +y: bottom half first), one term per dot eaten."""
++    # Per-axis scales from 10M-step policies: they rarely clear a level, so left/right order is
++    # weak, while spawning in the bottom half makes bottom-first the default.
++    scale = np.array([30.0, 15.0], dtype=np.float32)
++    x_split, y_split = 92, 80
++    dots_first_maze, dots_other_mazes = 154, 150
++    # ram39 is a phase counter: 255 in play, 1-33 ready pause, 55-71 level clear, 73-82 death.
++    phase = ram[:, 39]
++    frozen = (phase < 34) | ((phase > 54) & (phase < 255))
++    eaten_before = prev_ram[:, 119].astype(np.float32)
++    eat = (ram[:, 119] > prev_ram[:, 119]) & ~frozen
++    n_dots = np.where(ram[:, 0] == 0, dots_first_maze, dots_other_mazes)
++    w = 1.0 - 2.0 * eaten_before / (n_dots - 1)
++    side = np.stack(
++        [np.where(ram[:, 10] >= x_split, 1.0, -1.0), np.where(ram[:, 16] >= y_split, 1.0, -1.0)],
++        axis=1,
++    )
++    return (eat * w)[:, None] * side * scale
++
++
++ATARI_DESCRIPTORS = {
++    "atari_boxing": (["opponent_distance", "ring_height"], boxing),
++    "atari_asterix": (["x", "lane"], asterix),
++    "atari_seaquest": (["x", "depth"], seaquest),
++    "atari_mspacman_order": (["right_first", "bottom_first"], mspacman),
++}
+diff --git a/refqd/tasks/envpool_atari_task.py b/refqd/tasks/envpool_atari_task.py
+index 753b56a..82423ac 100644
+--- a/refqd/tasks/envpool_atari_task.py
++++ b/refqd/tasks/envpool_atari_task.py
+@@ -6,12 +6,15 @@ from qdax.types import Action, Descriptor
+ import numpy as np
+ import gymnasium.spaces
+ 
++from collections.abc import Callable
+ from typing import Any
+ from overrides import override
+ 
+-from .gym_task import GymJnpState
++from .gym_task import GymOnpState, GymJnpState
+ from .envpool_task import EnvPoolTask
++from .atari_descriptors import ATARI_DESCRIPTORS
+ from ..config.task import AtariConfig
++from ..utils import onp_callback
+ 
+ 
+ class AtariTask(EnvPoolTask[AtariConfig]):
+@@ -20,6 +23,7 @@ class AtariTask(EnvPoolTask[AtariConfig]):
+     def __init__(self, cfg: AtariConfig, batch_shape: tuple[int, ...]) -> None:
+         super().__init__(cfg, batch_shape)
+         assert self._cfg.subtype == 'Atari'
++        assert self._cfg.bd in ('refqd', 'ours')
+ 
+     @property
+     def _make_kwargs(self) -> dict[str, Any]:
+@@ -27,12 +31,14 @@ class AtariTask(EnvPoolTask[AtariConfig]):
+             'img_height': self._cfg.obs_shape[0],
+             'img_width': self._cfg.obs_shape[0],
+             'stack_num': 1,
+-            'episodic_life': True,
++            'episodic_life': not self._cfg.full_game,
+         }
+ 
+     @property
+     @override
+     def behavior_descriptor_length(self) -> int:
++        if self._cfg.bd == 'ours':
++            return self.state_descriptor_length
+         match self._cfg.name:
+             case 'Pong-v5':
+                 return 1
+@@ -44,6 +50,8 @@ class AtariTask(EnvPoolTask[AtariConfig]):
+     @property
+     @override
+     def behavior_descriptor_limits(self) -> tuple[list[float], list[float]]:
++        if self._cfg.bd == 'ours':
++            return ([-1.0] * self.state_descriptor_length, [1.0] * self.state_descriptor_length)
+         match self._cfg.name:
+             case 'Pong-v5':
+                 return ([0.0], [1.0])
+@@ -60,6 +68,8 @@ class AtariTask(EnvPoolTask[AtariConfig]):
+                 return 22.0
+             case 'Boxing-v5':
+                 return 100.0
++            case 'Asterix-v5' | 'MsPacman-v5' | 'Seaquest-v5':
++                return 0.0
+             case _:
+                 raise NotImplementedError(self._cfg.name)
+ 
+@@ -81,6 +91,8 @@ class AtariTask(EnvPoolTask[AtariConfig]):
+     @property
+     @override
+     def state_descriptor_length(self) -> int:
++        if self._cfg.bd == 'ours':
++            return len(ATARI_DESCRIPTORS[self._cfg.descriptor_set][0])
+         match self._cfg.name:
+             case 'Pong-v5':
+                 return 1
+@@ -95,8 +107,44 @@ class AtariTask(EnvPoolTask[AtariConfig]):
+         obs = np.moveaxis(obs, -3, -1)
+         return obs
+ 
++    @property
++    def _descriptor_fn(self) -> Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
++        return ATARI_DESCRIPTORS[self._cfg.descriptor_set][1]
++
++    @override
++    def _build_onp_state(self, results: list[tuple]) -> GymOnpState:
++        obs, reward, done, truncated, info = super()._build_onp_state(results)
++        if self._cfg.bd == 'ours':
++            info['ram'] = np.stack([result[-1]['ram'] for result in results]).reshape(-1, 128)
++        return obs, reward, done, truncated, info
++
++    @onp_callback
++    @override
++    def _onp_reset(self, seeds: np.ndarray, _: np.ndarray) -> GymOnpState:
++        obs, reward, done, truncated, info = super()._onp_reset(seeds, _)
++        if self._cfg.bd == 'ours':
++            self._prev_ram = info.pop('ram')
++            info['state_descriptor'] = np.zeros(
++                (*self._batch_shape, self.state_descriptor_length), dtype=np.float32
++            )
++        return obs, reward, done, truncated, info
++
++    @onp_callback
++    @override
++    def _onp_step(self, action: np.ndarray) -> GymOnpState:
++        obs, reward, done, truncated, info = super()._onp_step(action)
++        if self._cfg.bd == 'ours':
++            ram = info.pop('ram')
++            desc = self._descriptor_fn(ram, self._prev_ram, action.reshape(-1))
++            self._prev_ram = ram
++            info['state_descriptor'] = desc.reshape(*self._batch_shape, -1).astype(np.float32)
++        return obs, reward, done, truncated, info
++
+     @override
+     def _build_jnp_state(self, state: GymJnpState, action: Action) -> GymJnpState:
++        if self._cfg.bd != 'refqd':
++            return state
++
+         obs, reward, done, truncated, info = state
+ 
+         match self._cfg.name:
+@@ -116,6 +164,12 @@ class AtariTask(EnvPoolTask[AtariConfig]):
+     def extract_behavior_descriptor(
+         self, transition: buffer.QDTransition, mask: jax.Array
+     ) -> Descriptor:
++        if self._cfg.bd == 'ours':
++            mask = jnp.expand_dims(mask, axis=-1)
++            descriptors = jnp.sum(transition.next_state_desc * (1.0 - mask), axis=1)
++            descriptors = descriptors / jnp.sum(1.0 - mask, axis=1)
++            return jnp.clip(descriptors, -1.0, 1.0)
++
+         match self._cfg.name:
+             case 'Pong-v5' | 'Boxing-v5':
+                 # reshape mask for bd extraction
+diff --git a/refqd/tasks/envpool_task.py b/refqd/tasks/envpool_task.py
+index a5c8248..bf61649 100644
+--- a/refqd/tasks/envpool_task.py
++++ b/refqd/tasks/envpool_task.py
+@@ -7,7 +7,6 @@ from qdax.types import (
+ 
+ import numpy as np
+ import envpool
+-import envpool.python.lax
+ import envpool.python.envpool
+ import envpool.python.gymnasium_envpool
+ import envpool.python.protocol
+@@ -38,7 +37,6 @@ class GymnasiumEnvPoolEnv(
+     envpool.python.protocol.EnvPool,
+     envpool.python.gymnasium_envpool.GymnasiumEnvPoolMixin,
+     envpool.python.envpool.EnvPoolMixin,
+-    envpool.python.lax.XlaMixin,
+     gymnasium.Env,
+ ):
+     _state_keys: list[str]
+@@ -119,6 +117,7 @@ class EnvPoolTask(
+             self.env_name,
+             num_envs=self._batch_shape[-1],
+             seed=seed,
++            env_seed=[seed] * self._batch_shape[-1],
+             max_episode_steps=self._cfg.episode_len,
+             **self._make_kwargs,
+         ) for seed in self._seeds)
+diff --git a/refqd/tasks/rl_task.py b/refqd/tasks/rl_task.py
+index bae5d2c..600ee41 100644
+--- a/refqd/tasks/rl_task.py
++++ b/refqd/tasks/rl_task.py
+@@ -202,6 +202,10 @@ class RLTask(Task[_RLTaskConfigT], Generic[_RLTaskConfigT, _EnvT, _EnvStateT]):
+     def env(self) -> _EnvT:
+         return self._env
+ 
++    @property
++    def uint8_obs_buffer(self) -> bool:
++        return self._cfg.uint8_obs_buffer
++
+     def close(self) -> None:
+         pass
+ 
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..edc74d3
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,123 @@
++--find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
++absl-py==2.5.0
++antlr4-python3-runtime==4.9.3
++anyio==4.15.1
++appdirs==1.4.4
++attrs==26.1.0
++brax==0.9.4
++certifi==2026.7.22
++charset-normalizer==3.5.1
++chex==0.1.85
++click==8.5.0
++cloudpickle==3.1.2
++colorlog==6.12.0
++contourpy==1.3.3
++cycler==0.12.1
++decorator==5.3.1
++dm-env==1.6
++dm-tree==0.1.10
++docker-pycreds==0.4.0
++envpool==1.2.7
++envpool-assets==0.4.1
++envpool-assets-mjlab==0.1.0
++envpool-assets-mujoco-large==0.4.0
++envpool-assets-mujoco-playground-humanoid==0.4.0
++etils==1.14.0
++farama-notifications==0.0.6
++filelock==4.0.3
++flask==2.2.5
++flask-cors==6.0.5
++flax==0.8.0
++fonttools==4.66.0
++fsspec==2026.9.0
++gast==0.7.0
++gitdb==4.0.12
++gitpython==3.1.62
++glfw==2.10.2
++grpcio==1.84.0
++gym==0.26.2
++gym-notices==0.1.0
++gymnasium==0.28.1
++h11==0.16.0
++hf-xet==1.6.0
++httpcore2==2.13.1
++httpx2==2.13.1
++huggingface-hub==2.0.0
++hydra-colorlog==1.2.0
++hydra-core==1.3.2
++idna==3.20
++itsdangerous==2.2.0
++jax==0.4.20
++jax-jumpy==1.0.0
++jaxlib==0.4.20+cuda12.cudnn89
++jaxopt==0.8.5
++jinja2==3.0.3
++joblib==1.6.0
++jumanji==1.0.1
++kiwisolver==1.5.1
++lz4==4.4.5
++markdown-it-py==4.2.0
++markupsafe==3.0.3
++matplotlib==3.7.5
++mdurl==0.1.2
++ml-collections==1.1.0
++ml-dtypes==0.5.4
++msgpack==1.2.2
++mujoco==3.1.1
++mujoco-mjx==3.1.1
++narwhals==2.26.0
++nest-asyncio==1.6.0
++numpy==1.26.4
++nvidia-cublas-cu12==12.9.2.10
++nvidia-cuda-cupti-cu12==12.9.79
++nvidia-cuda-nvcc-cu12==12.9.86
++nvidia-cuda-nvrtc-cu12==12.9.86
++nvidia-cuda-runtime-cu12==12.9.79
++nvidia-cudnn-cu12==8.9.7.29
++nvidia-cufft-cu12==11.4.1.4
++nvidia-cusolver-cu12==11.7.5.82
++nvidia-cusparse-cu12==12.5.10.65
++nvidia-nccl-cu12==2.32.3
++nvidia-nvjitlink-cu12==12.9.86
++omegaconf==2.3.0
++opt-einsum==3.4.0
++optax==0.1.8
++optree==0.20.0
++orbax-checkpoint==0.4.4
++overrides==7.7.0
++packaging==26.3
++pillow==12.3.0
++protobuf==4.25.9
++psutil==7.2.2
++pydantic==1.10.26
++pygments==2.21.0
++pyopengl==3.1.10
++pyparsing==3.3.3
++python-dateutil==2.9.0.post0
++pytinyrenderer==0.0.14
++pyyaml==6.0.3
++qdax @ git+https://github.com/adaptive-intelligent-robotics/QDax.git@a7212217da4ab5c058e900ff44b5efe02db85ce4
++requests==2.34.2
++requests-unixsocket==0.4.1
++rich==15.0.0
++scikit-learn==1.9.1
++scipy==1.12.0
++sentry-sdk==2.70.0
++setproctitle==1.3.7
++setuptools==69.5.1
++six==1.17.0
++smmap==5.0.3
++tensorboardx==2.6.5
++tensorflow-probability==0.23.0
++tensorstore==0.1.85
++threadpoolctl==3.7.0
++toolz==1.1.0
++tqdm==4.70.1
++trimesh==5.1.0
++truststore==0.10.4
++typing-extensions==4.16.0
++urllib3==2.8.0
++wandb==0.16.2
++werkzeug==3.1.8
++wrapt==2.4.1
++zipp==4.1.0

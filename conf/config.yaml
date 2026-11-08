@@ -1,0 +1,24 @@
+defaults:
+  - _self_
+  - env: halfcheetah
+  - algorithm: reppo
+
+exp_name: ${algorithm.name}_${env.name}
+log_dir: outputs/${exp_name}_${now:%m%d_%H%M}
+seed: 23
+device: cuda
+
+logging:
+  wandb: false
+  project: reppo
+  entity: null
+  group: default
+  name: null
+  tags: []
+
+hydra:
+  run:
+    dir: ${log_dir}
+  output_subdir: null
+  job:
+    chdir: false

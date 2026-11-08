@@ -1,0 +1,50 @@
+_target_: src.algorithms.reppo.RePPO
+name: reppo_pixels
+
+total_timesteps: 262_144_000 # 4000 iters at N*E*T = 65,536 steps/iter
+lr_schedule_timesteps: null
+N: 16
+num_envs_per_policy: 16
+num_steps: 256
+
+learning_rate: 3e-4
+anneal_lr: true
+lr_anneal: floored
+gamma: 0.99
+gae_lambda: 0.95
+num_minibatches: 16 # minibatch 256/policy
+update_epochs: 4
+norm_adv: true
+clip_coef: 0.2
+clip_vloss: true
+ent_coef: 0.005
+vf_coef: 0.5
+max_grad_norm: 0.5
+scale_descriptor_returns: false
+
+hidden_dim: 512
+logstd_init: 0.0
+
+# Vision encoder shared by actor and critics; heads are 2-layer MLPs.
+policy:
+  arch: nature # Nature CNN (Mnih et al. 2015)
+
+K_nn: 4
+gamma_sq: 0.1
+beta_f: 0.99
+beta_b: 0.99
+C_max: 1.0
+eps_f: 1.0
+eps_b: 1e-6
+
+repulsion_mode: symmetric
+use_exact_wk: false
+
+force_c_zero: false
+
+eval:
+  enabled: true
+  every_iters: 50
+  num_episodes: 4
+checkpoint_every_iters: null # only the final checkpoint is stored
+log_every_iters: 1

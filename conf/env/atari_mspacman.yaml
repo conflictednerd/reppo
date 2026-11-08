@@ -1,0 +1,6 @@
+name: atari_mspacman
+backend: atari
+env_id: MsPacman-v5
+descriptor_set: atari_mspacman_order
+repeat_action_probability: 0.25 # sticky actions, train and eval
+num_threads: 0 # envpool worker threads (0: envpool default); speed only

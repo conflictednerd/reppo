@@ -1,0 +1,12 @@
+# Qwen3-1.7B-Base, overlay on conf/math.yaml: Qwen's chat format with the boxed instruction as the system turn and the
+# bare problem as the user turn.
+policy_path: Qwen/Qwen3-1.7B-Base
+out_dir: ../outputs/llm/math_qwen3
+shm_dir: /dev/shm/reppo_llm/math_qwen3   # adapters published to vLLM each iteration
+pad_token: <|fim_pad|>
+use_chat_template: true
+system_prompt: "Please reason step by step, and put your final answer within \\boxed{}."
+user_template: "{}"
+extra_stop_tokens: [<|im_end|>]   # generation_config's EOS is <|endoftext|> only
+gradient_checkpointing: false
+train_tokens: 8192

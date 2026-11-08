@@ -1,0 +1,69 @@
+# RePPO on math reasoning, zero RL from a base model: N LoRA members of one frozen base, each trained with PPO and its
+# own critic; fitness = final-answer correctness (math_correct; a truncated response scores 0), normalized by the
+# initial policy's mean / std. This file is the protocol shared by every model; a model overlay adds the policy, its
+# prompt format, stops and paths (run.sh has every run of the paper).
+seed: 1
+
+data:  # problems and reference answers (scripts/make_math.py); user_template adds the instruction
+  train: data/math/prompts_train.parquet  # MATH train, levels 3-5
+  eval: data/math/prompts_val.parquet     # validation: in-loop eval and checkpoint selection
+
+N: 5
+# Reasoning-style text features (reppo_llm/descriptors.py), measured up to the end of the last \boxed{}: code,
+# verification, symbols and markdown. Each is correctness x tanh((x - mu) / sigma), with mu fit on the initial policy's
+# correct answers.
+descriptors: [code, verification, symbols, markdown]
+descriptor_scales:       # sigma, shared by all models so that their behaviour spaces have the same units
+  code: 0.098
+  verification: 1.845
+  symbols: 0.170
+  markdown: 0.233
+iterations: 100
+prompts_per_iter: 128    # x samples_per_prompt = 1,024 responses per member per iteration
+samples_per_prompt: 8
+max_prompt_tokens: 2048   # the longest MATH L3-5 prompts are ~1.7k tokens; vLLM max_model_len = prompt + response
+max_new_tokens: 4096
+temperature: 1.0
+eval_temperature: 0.6
+eval_top_p: 0.95
+vllm_gpu_util: 0.5
+vllm_sleep: true       # vLLM sleeps outside generation (weights to CPU, KV cache freed), so training has the GPU
+gradient_checkpointing: true   # or the fraction of layers checkpointed; the model overlays set it with train_tokens
+
+lora: {r: 32, alpha: 32}
+critic_lora: {r: 64, alpha: 64}
+lora_b_init_std: 1.0e-3  # symmetry breaking between members
+
+optim:
+  actor_lr: 5.0e-5
+  critic_lr: 1.0e-4
+  betas: [0.9, 0.95]
+  eps: 1.0e-5
+  weight_decay: 0.0
+  grad_clip: 1.0
+  warmup_frac: 0.03  # actor LR warmup, as a fraction of iterations, after the critic warmup
+
+ppo_epochs: 1
+minibatch: 256         # responses: 4 policy updates per iteration
+train_tokens: 16384    # padded tokens per training microbatch (engineering only: losses are minibatch token means)
+forward_tokens: 32768  # padded tokens per no-grad forward microbatch
+clip: 0.2
+vclip: 0.2
+gamma: 1.0
+lam: 1.0
+critic_warmup_iters: 15  # critic-only updates before the actor starts
+
+reppo:  # diversity coefficients (src/utils/population.py); fitness is in units of the initial policy's std
+  K_nn: 8
+  gamma_sq: 0.5
+  beta_f: 0.7
+  beta_b: 0.7
+  C_max: 0.5
+  eps_f: 1.0
+  eps_b: 0.05
+  repulsion_mode: symmetric
+  force_c_zero: false  # true: independent PPO members (Ind-PPO)
+
+eval: {every: 10, num_prompts: 384, repeats: 2}   # the validation set, 2 samples per problem per member
+save_every: 10   # actor adapters kept (every evaluated iteration can be selected); the full resumable state
+                 # (resume=true) keeps only the latest

@@ -1,0 +1,8 @@
+name: lunarlander
+backend: gymnasium
+env_id: LunarLander-v3
+descriptor_set: lunarlander_impact
+normalize_obs: true
+clip_obs: 10.0
+clip_reward: 100.0
+max_episode_steps: 1000
