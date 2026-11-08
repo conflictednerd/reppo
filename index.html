@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>RePPO: Repulsive Population Policy Gradients</title>
+<meta name="description" content="RePPO adapts PPO to train a compact population of behaviorally diverse, high-quality policies by shaping each member's reward with the current population. Project page for the paper Repulsive Population Policy Gradients for Behaviorally Diverse Reinforcement Learning.">
+<link rel="canonical" href="https://conflictednerd.github.io/reppo/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Repulsive Population Policy Gradients for Behaviorally Diverse Reinforcement Learning">
+<meta property="og:description" content="RePPO adapts PPO to train a compact population of behaviorally diverse, high-quality policies by shaping each member's reward with the current population.">
+<meta property="og:url" content="https://conflictednerd.github.io/reppo/">
+<meta property="og:image" content="https://conflictednerd.github.io/reppo/assets/fig/teaser_og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%232a78d6'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk" crossorigin="anonymous"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --ink: #1c1f23;
+    --text: #2b2f35;
+    --muted: #646a72;
+    --rule: #e2e4e7;
+    --panel: #f5f6f7;
+    --accent: #2a78d6;      /* RePPO blue, as in the figures */
+    --accent-ink: #1f5fae;
+    --indppo: #008300;      /* Ind-PPO green, as in the figures */
+    --f1: #8e6bb5; --f2: #3f9c9c; --f3: #d1913c; --f4: #c2583f;   /* per-foot bar colours (not method colours) */
+    --col: 720px;
+    --wide: 1040px;
+    --serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --sans: "Source Sans 3", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--serif);
+    font-size: 18px;
+    line-height: 1.6;
+    font-feature-settings: "kern", "liga", "onum";
+    overflow-x: hidden;
+  }
+  main { padding: 0 16px 48px; }
+  .col { max-width: var(--col); margin: 0 auto; }
+  .wide { max-width: var(--wide); margin: 0 auto; }
+
+  a { color: var(--accent-ink); text-decoration: none; border-bottom: 1px solid rgba(42,120,214,.35); }
+  a:hover { border-bottom-color: var(--accent-ink); }
+  p { margin: 0 0 1.1em; }
+  strong { font-weight: 600; color: var(--ink); }
+  em { font-style: italic; }
+  h1, h2, h3 { font-family: var(--serif); color: var(--ink); font-weight: 600; line-height: 1.2; letter-spacing: -0.005em; }
+  h2 { font-size: 1.55rem; margin: 2.6em 0 0.7em; }
+  h3 { font-size: 1.15rem; margin: 2em 0 0.5em; }
+  h2 + p, h3 + p { margin-top: 0; }
+  .small { font-size: 0.92rem; color: var(--muted); }
+  sup { font-size: 0.65em; line-height: 0; }
+
+  /* Title block */
+  header { padding: 64px 16px 8px; text-align: center; }
+  header h1 { font-size: 2.3rem; margin: 0 auto 0.6em; max-width: 820px; font-weight: 600; }
+  .authors { font-size: 1.1rem; margin: 0 0 0.3em; color: var(--ink); }
+  .authors span { white-space: nowrap; }
+  .affil { font-size: 0.95rem; color: var(--muted); margin: 0 0 0.4em; }
+  .venue { font-size: 0.95rem; color: var(--muted); margin: 0 0 1.4em; }
+  .links { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-bottom: 2.2em; font-family: var(--sans); }
+  .links a {
+    border: 1px solid var(--rule); border-radius: 999px; padding: 6px 16px;
+    color: var(--ink); font-size: 0.95rem; font-weight: 600; background: #fff;
+  }
+  .links a:hover { border-color: var(--accent); color: var(--accent-ink); }
+  .tldr {
+    text-align: left; max-width: var(--col); margin: 0 auto;
+    border-left: 3px solid var(--accent); padding: 2px 0 2px 18px; font-size: 1.05rem; color: var(--ink);
+  }
+  .tldr b { font-family: var(--sans); font-weight: 600; letter-spacing: .04em; font-size: 0.85rem; color: var(--accent-ink); margin-right: .5em; }
+
+  /* Figures */
+  figure { margin: 1.8em auto 2.6em; }
+  figure img { display: block; width: 100%; height: auto; }
+  figure.wide img { max-width: var(--wide); margin: 0 auto; }
+  figcaption {
+    font-family: var(--sans); font-size: 0.92rem; line-height: 1.5; color: var(--muted);
+    max-width: var(--col); margin: 0.9em auto 0;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+  figure.narrow img { max-width: 620px; margin: 0 auto; }
+  figure.wide, figure.narrow { margin: 1.8em auto 2.6em; }
+
+  /* Video gallery */
+  .tabs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 0 0 1.2em; font-family: var(--sans); }
+  .tabs button {
+    font: inherit; font-size: 0.95rem; font-weight: 600; cursor: pointer;
+    border: 1px solid var(--rule); border-radius: 999px; padding: 5px 14px; background: #fff; color: var(--text);
+  }
+  .tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .task[hidden] { display: none; }
+  .legend { font-family: var(--sans); font-size: 0.8rem; color: var(--muted); text-align: center; margin: 0 0 0.8em; }
+  .legend .sw { display: inline-block; width: 0.9em; height: 0.45em; border-radius: 1px; background: var(--c); margin: 0 0.3em 0 0.9em; vertical-align: 0.1em; }
+  .gallery { display: grid; grid-template-columns: repeat(var(--cols, 4), 1fr); gap: 14px; max-width: var(--gw, none); margin: 0 auto; }
+  .clip { font-family: var(--sans); }
+  .clip video { display: block; width: 100%; height: auto; background: #fff; border: 1px solid var(--rule); border-radius: 4px; }
+  .meta { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+  .ret { flex: 0 0 6.4em; font-size: 0.78rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .ret b { color: var(--ink); font-weight: 600; }
+  .bars { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+  .bar { display: block; height: 4px; border-radius: 2px; background: #e6e8eb; position: relative; }
+  .bar::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: var(--v); background: var(--c); border-radius: 2px; }
+  .bar:nth-child(1) { --c: var(--f1); } .bar:nth-child(2) { --c: var(--f2); } .bar:nth-child(3) { --c: var(--f3); } .bar:nth-child(4) { --c: var(--f4); }
+
+  /* Math */
+  .katex-display { margin: 1.2em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+  .katex { font-size: 1.05em; }
+
+  /* Steps */
+  ol.steps { padding-left: 1.3em; margin: 0 0 1.2em; }
+  ol.steps li { margin-bottom: .35em; }
+  ul.plain { padding-left: 1.2em; margin: 0 0 1.2em; }
+  ul.plain li { margin-bottom: .45em; }
+
+  /* Legend of method colours */
+  .key { display: inline-block; width: .7em; height: .7em; border-radius: 50%; vertical-align: baseline; margin-right: .25em; }
+
+  /* Table */
+  table { border-collapse: collapse; width: 100%; font-family: var(--sans); font-size: 0.92rem; line-height: 1.35; margin: 1.2em 0 .6em; font-variant-numeric: tabular-nums; }
+  th, td { padding: 4px 10px; text-align: right; border-bottom: 1px solid var(--rule); }
+  th { font-weight: 600; color: var(--ink); border-bottom: 1.5px solid var(--ink); }
+  th:first-child, td:first-child { text-align: left; }
+  tr.group td { padding-top: 8px; padding-bottom: 2px; color: var(--muted); font-style: italic; border-bottom: none; }
+  tr.hl td { font-weight: 600; color: var(--ink); background: rgba(42,120,214,.06); }
+  .tabcap { font-family: var(--sans); font-size: 0.92rem; color: var(--muted); margin-bottom: 1.6em; }
+
+  /* Side-by-side LLM solutions */
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 1.4em 0 .6em; align-items: start; }
+  .sol { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; font-size: 0.86rem; line-height: 1.5; position: relative; }
+  .pair:not(.open) .sol { max-height: 260px; overflow: hidden; }
+  .pair:not(.open) .sol::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 90px; background: linear-gradient(rgba(245,246,247,0), var(--panel) 85%); pointer-events: none; }
+  .expand { text-align: center; margin: 0 0 1em; }
+  .expand button { font: 600 0.85rem var(--sans); cursor: pointer; border: 1px solid var(--rule); border-radius: 999px; padding: 4px 14px; background: #fff; color: var(--text); }
+  .expand button:hover { border-color: var(--accent); color: var(--accent-ink); }
+  .sol .hd { font-family: var(--sans); font-weight: 600; color: var(--ink); margin: 0 0 .2em; }
+  .sol .desc { font-family: var(--sans); font-size: 0.78rem; color: var(--muted); margin: 0 0 .8em; }
+  .sol p { margin: 0 0 .6em; }
+  .sol pre { font-family: var(--mono); font-size: 0.78rem; line-height: 1.45; background: #fff; border: 1px solid var(--rule); border-radius: 4px; padding: 8px 10px; margin: 0 0 .6em; overflow-x: auto; white-space: pre-wrap; }
+  .sol .boxed { border: 1px solid var(--ink); padding: 0 .25em; }
+
+  /* BibTeX */
+  .bib { position: relative; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; }
+  .bib pre { margin: 0; font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .bib button {
+    position: absolute; top: 10px; right: 10px; font: 600 0.8rem var(--sans); cursor: pointer;
+    border: 1px solid var(--rule); border-radius: 999px; padding: 3px 11px; background: #fff; color: var(--text);
+  }
+  .bib button:hover { border-color: var(--accent); color: var(--accent-ink); }
+
+  @media (max-width: 760px) {
+    body { font-size: 17px; }
+    header { padding-top: 40px; }
+    header h1 { font-size: 1.7rem; }
+    h2 { font-size: 1.35rem; margin-top: 2.2em; }
+    .gallery { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .tabs { gap: 6px; }
+    .tabs button { font-size: 0.88rem; padding: 4px 11px; }
+    figure.scroll .frame { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    figure.scroll img { min-width: 760px; }
+    figure.scroll figcaption::after { content: " Scroll the figure sideways to see all four panels."; font-style: italic; }
+    .pair { grid-template-columns: 1fr; }
+    table { font-size: 0.86rem; }
+    th, td { padding: 4px 6px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Repulsive Population Policy Gradients for Behaviorally Diverse Reinforcement Learning</h1>
+  <p class="authors">
+    <span>Saeed Hedayatian<sup>1</sup></span> &nbsp;·&nbsp;
+    <span>Harsh Shah<sup>1</sup></span> &nbsp;·&nbsp;
+    <span>Celine Mneimneh<sup>2</sup></span> &nbsp;·&nbsp;
+    <span>Stefanos Nikolaidis<sup>1</sup></span>
+  </p>
+  <p class="affil"><sup>1</sup>Thomas Lord Department of Computer Science, University of Southern California &nbsp;&nbsp; <sup>2</sup>Independent Researcher</p>
+  <p class="venue">Preprint, 2026</p>
+  <nav class="links">
+    <a href="https://arxiv.org/abs/2610.36425">Paper (arXiv)</a>
+    <a href="https://github.com/conflictednerd/reppo">Code</a>
+    <a href="#bibtex">BibTeX</a>
+  </nav>
+  <p class="tldr"><b>TL;DR</b> RePPO turns the gradient of a quality-diversity objective into a per-policy shaped reward, so that a small population of ordinary PPO learners ends up both high-performing and behaviorally distinct, without an archive or evolutionary operators. It gives the best quality–diversity tradeoff on four Brax tasks and scales to Atari from pixels and to LLM fine-tuning.</p>
+</header>
+
+<main>
+
+<figure class="wide">
+  <img src="assets/fig/teaser.webp" alt="Diagram: a population of policies in a two-dimensional behavior space before and after training. A zoom on one member shows its repulsion direction from nearby high-quality members and the direction of higher return; the shaped reward is the task reward plus the repulsion term." width="2000" height="708">
+  <figcaption><b>Figure 1.</b> One RePPO iteration in behavior space, shaded by return. Each member <em>k</em> is pushed away from nearby high-return members (zoom), and PPO maximizes its shaped reward <span class="m">\(\tilde r_k = r + p_k^{\top} m\)</span>. After training, the members occupy separate high-return regions.</figcaption>
+</figure>
+
+<section class="col" id="gallery">
+  <h2>One task, many ways to solve it</h2>
+  <p>The clips below are policies trained by RePPO on Brax locomotion tasks. Each one makes progress on the task in its own way. The bars under each clip show how much of the time each foot touches the ground. This is the behavior descriptor that RePPO diversifies.</p>
+</section>
+
+<figure class="wide" id="clips">
+  <div class="tabs" role="tablist" aria-label="Task">
+    <button role="tab" aria-selected="true" data-task="humanoid">Humanoid</button>
+    <button role="tab" aria-selected="false" data-task="walker2d">Walker2D</button>
+    <button role="tab" aria-selected="false" data-task="halfcheetah">HalfCheetah</button>
+    <button role="tab" aria-selected="false" data-task="ant">Ant</button>
+  </div>
+  <div class="task" data-task="humanoid">
+    <p class="legend">Foot contact: <span class="sw" style="--c:var(--f1)"></span>left foot <span class="sw" style="--c:var(--f2)"></span>right foot</p>
+    <div class="gallery" style="--cols:3; --gw:820px">
+      <div class="clip"><video autoplay muted loop playsinline preload="auto" poster="assets/poster/humanoid_high-knee-hop.jpg" width="400" height="436" aria-label="Humanoid policy trained by RePPO, mean return 7404"><source src="assets/video/humanoid_high-knee-hop.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>7404</b></span><span class="bars"><span class="bar" style="--v:25%" title="left foot: 25%"></span><span class="bar" style="--v:0%" title="right foot: 0%"></span></span></div></div>
+      <div class="clip"><video autoplay muted loop playsinline preload="auto" poster="assets/poster/humanoid_wide-shuffle.jpg" width="400" height="436" aria-label="Humanoid policy trained by RePPO, mean return 7221"><source src="assets/video/humanoid_wide-shuffle.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>7221</b></span><span class="bars"><span class="bar" style="--v:5%" title="left foot: 5%"></span><span class="bar" style="--v:91%" title="right foot: 91%"></span></span></div></div>
+      <div class="clip"><video autoplay muted loop playsinline preload="auto" poster="assets/poster/humanoid_extended-leg-hop.jpg" width="400" height="436" aria-label="Humanoid policy trained by RePPO, mean return 5919"><source src="assets/video/humanoid_extended-leg-hop.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>5919</b> <sup>†</sup></span><span class="bars"><span class="bar" style="--v:92%" title="left foot: 92%"></span><span class="bar" style="--v:0%" title="right foot: 0%"></span></span></div></div>
+      <div class="clip"><video autoplay muted loop playsinline preload="auto" poster="assets/poster/humanoid_split-stride.jpg" width="400" height="436" aria-label="Humanoid policy trained by RePPO, mean return 5763"><source src="assets/video/humanoid_split-stride.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>5763</b></span><span class="bars"><span class="bar" style="--v:70%" title="left foot: 70%"></span><span class="bar" style="--v:21%" title="right foot: 21%"></span></span></div></div>
+      <div class="clip"><video autoplay muted loop playsinline preload="auto" poster="assets/poster/humanoid_driving-run.jpg" width="400" height="436" aria-label="Humanoid policy trained by RePPO, mean return 5493"><source src="assets/video/humanoid_driving-run.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>5493</b> <sup>†</sup></span><span class="bars"><span class="bar" style="--v:20%" title="left foot: 20%"></span><span class="bar" style="--v:7%" title="right foot: 7%"></span></span></div></div>
+      <div class="clip"><video autoplay muted loop playsinline preload="auto" poster="assets/poster/humanoid_crouch-lunge.jpg" width="400" height="436" aria-label="Humanoid policy trained by RePPO, mean return 5247"><source src="assets/video/humanoid_crouch-lunge.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>5247</b></span><span class="bars"><span class="bar" style="--v:86%" title="left foot: 86%"></span><span class="bar" style="--v:35%" title="right foot: 35%"></span></span></div></div>
+    </div>
+  </div>
+  <div class="task" data-task="walker2d" hidden>
+    <p class="legend">Foot contact: <span class="sw" style="--c:var(--f1)"></span>right foot <span class="sw" style="--c:var(--f2)"></span>left foot</p>
+    <div class="gallery" style="--cols:4">
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/walker2d_leaning-leap.jpg" width="400" height="436" aria-label="Walker2D policy trained by RePPO, mean return 5568"><source src="assets/video/walker2d_leaning-leap.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>5568</b></span><span class="bars"><span class="bar" style="--v:8%" title="right foot: 8%"></span><span class="bar" style="--v:1%" title="left foot: 1%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/walker2d_head-down-bound.jpg" width="400" height="436" aria-label="Walker2D policy trained by RePPO, mean return 5222"><source src="assets/video/walker2d_head-down-bound.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>5222</b></span><span class="bars"><span class="bar" style="--v:14%" title="right foot: 14%"></span><span class="bar" style="--v:8%" title="left foot: 8%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/walker2d_flat-glide.jpg" width="400" height="436" aria-label="Walker2D policy trained by RePPO, mean return 4182"><source src="assets/video/walker2d_flat-glide.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>4182</b></span><span class="bars"><span class="bar" style="--v:8%" title="right foot: 8%"></span><span class="bar" style="--v:55%" title="left foot: 55%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/walker2d_one-foot-hop.jpg" width="400" height="436" aria-label="Walker2D policy trained by RePPO, mean return 3486"><source src="assets/video/walker2d_one-foot-hop.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>3486</b></span><span class="bars"><span class="bar" style="--v:56%" title="right foot: 56%"></span><span class="bar" style="--v:1%" title="left foot: 1%"></span></span></div></div>
+    </div>
+  </div>
+  <div class="task" data-task="halfcheetah" hidden>
+    <p class="legend">Foot contact: <span class="sw" style="--c:var(--f1)"></span>front foot <span class="sw" style="--c:var(--f2)"></span>back foot</p>
+    <div class="gallery" style="--cols:3">
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/halfcheetah_nose-down-dive.jpg" width="480" height="272" aria-label="HalfCheetah policy trained by RePPO, mean return 5502"><source src="assets/video/halfcheetah_nose-down-dive.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>5502</b></span><span class="bars"><span class="bar" style="--v:17%" title="front foot: 17%"></span><span class="bar" style="--v:1%" title="back foot: 1%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/halfcheetah_airborne-bound.jpg" width="480" height="272" aria-label="HalfCheetah policy trained by RePPO, mean return 4596"><source src="assets/video/halfcheetah_airborne-bound.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>4596</b></span><span class="bars"><span class="bar" style="--v:7%" title="front foot: 7%"></span><span class="bar" style="--v:14%" title="back foot: 14%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/halfcheetah_reared-hop.jpg" width="480" height="272" aria-label="HalfCheetah policy trained by RePPO, mean return 3816"><source src="assets/video/halfcheetah_reared-hop.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>3816</b> <sup>†</sup></span><span class="bars"><span class="bar" style="--v:6%" title="front foot: 6%"></span><span class="bar" style="--v:28%" title="back foot: 28%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/halfcheetah_even-trot.jpg" width="480" height="272" aria-label="HalfCheetah policy trained by RePPO, mean return 3598"><source src="assets/video/halfcheetah_even-trot.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>3598</b></span><span class="bars"><span class="bar" style="--v:49%" title="front foot: 49%"></span><span class="bar" style="--v:59%" title="back foot: 59%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/halfcheetah_back-foot-skate.jpg" width="480" height="272" aria-label="HalfCheetah policy trained by RePPO, mean return 3369"><source src="assets/video/halfcheetah_back-foot-skate.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>3369</b></span><span class="bars"><span class="bar" style="--v:12%" title="front foot: 12%"></span><span class="bar" style="--v:99%" title="back foot: 99%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/halfcheetah_inverted-slide.jpg" width="480" height="272" aria-label="HalfCheetah policy trained by RePPO, mean return 2340"><source src="assets/video/halfcheetah_inverted-slide.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>2340</b></span><span class="bars"><span class="bar" style="--v:1%" title="front foot: 1%"></span><span class="bar" style="--v:0%" title="back foot: 0%"></span></span></div></div>
+    </div>
+  </div>
+  <div class="task" data-task="ant" hidden>
+    <p class="legend">Foot contact: <span class="sw" style="--c:var(--f1)"></span>front-left <span class="sw" style="--c:var(--f2)"></span>front-right <span class="sw" style="--c:var(--f3)"></span>back-left <span class="sw" style="--c:var(--f4)"></span>back-right</p>
+    <div class="gallery" style="--cols:2; --gw:820px">
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/ant_skimming-bound.jpg" width="480" height="322" aria-label="Ant policy trained by RePPO, mean return 4331"><source src="assets/video/ant_skimming-bound.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>4331</b></span><span class="bars"><span class="bar" style="--v:7%" title="front-left: 7%"></span><span class="bar" style="--v:7%" title="front-right: 7%"></span><span class="bar" style="--v:7%" title="back-left: 7%"></span><span class="bar" style="--v:6%" title="back-right: 6%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/ant_right-side-gait.jpg" width="480" height="322" aria-label="Ant policy trained by RePPO, mean return 3530"><source src="assets/video/ant_right-side-gait.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>3530</b></span><span class="bars"><span class="bar" style="--v:4%" title="front-left: 4%"></span><span class="bar" style="--v:12%" title="front-right: 12%"></span><span class="bar" style="--v:5%" title="back-left: 5%"></span><span class="bar" style="--v:14%" title="back-right: 14%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/ant_high-stance-plod.jpg" width="480" height="322" aria-label="Ant policy trained by RePPO, mean return 2583"><source src="assets/video/ant_high-stance-plod.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>2583</b></span><span class="bars"><span class="bar" style="--v:29%" title="front-left: 29%"></span><span class="bar" style="--v:6%" title="front-right: 6%"></span><span class="bar" style="--v:28%" title="back-left: 28%"></span><span class="bar" style="--v:26%" title="back-right: 26%"></span></span></div></div>
+      <div class="clip"><video muted loop playsinline preload="none" poster="assets/poster/ant_three-leg-gait.jpg" width="480" height="322" aria-label="Ant policy trained by RePPO, mean return 2491"><source src="assets/video/ant_three-leg-gait.mp4" type="video/mp4"></video><div class="meta"><span class="ret">return <b>2491</b></span><span class="bars"><span class="bar" style="--v:31%" title="front-left: 31%"></span><span class="bar" style="--v:36%" title="front-right: 36%"></span><span class="bar" style="--v:5%" title="back-left: 5%"></span><span class="bar" style="--v:35%" title="back-right: 35%"></span></span></div></div>
+    </div>
+  </div>
+  <figcaption><b>Figure 2.</b> Policies found by RePPO (populations of <em>N</em> = 32) on four Brax tasks, in real time. Under each clip are the policy's mean return and the fraction of time each foot is on the ground (full bar = 100%), both over 256 evaluation episodes. Within each task, the clips come from one training run, except those marked <sup>†</sup>, which come from other seeds.</figcaption>
+</figure>
+
+<section class="col">
+  <h2>The problem</h2>
+  <p>Standard RL looks for one policy that maximizes expected return, even when a task admits qualitatively different solutions. Quality-Diversity RL (QD-RL) instead asks for a <em>population</em> of high-performing policies that differ along a user-defined <em>behavior descriptor</em>, such as a robot's foot-contact pattern or where an Atari agent plays. The descriptor states which kind of diversity is wanted and makes it an explicit part of the learning problem.</p>
+  <p>Most QD-RL methods organize the search around an archive in the style of MAP-Elites: behavior space is partitioned into cells, each cell keeps its best solution, and evolutionary operators, increasingly combined with RL gradients, fill it. The number of cells grows quickly with descriptor dimension and resolution, and every cell holds a full policy, which becomes impractical once policies are convolutional networks or language-model adapters. We therefore ask whether quality and diversity can be optimized <strong>directly over a compact population, with standard RL updates</strong> and no discretization of behavior space.</p>
+</section>
+
+<section class="col" id="method">
+  <h2>How RePPO works</h2>
+  <p><strong>A continuous objective over a finite population.</strong> We start from the Soft QD lower bound (Hedayatian &amp; Nikolaidis, 2026). For policies with qualities <span class="m">\(f_n > 0\)</span> (expected return) and descriptors <span class="m">\(b_n \in \mathbb{R}^d\)</span>,</p>
+  <div class="m">\[
+    S(\theta) \;=\; \sum_{n=1}^{N} f_n \;-\; \sum_{i&lt;j} \sqrt{f_i f_j}\;\exp\!\Big(-\tfrac{\|b_i - b_j\|_2^2}{\ell^2}\Big).
+  \]</div>
+  <p>The first term rewards individual quality. The second penalizes pairs of policies that are both good and behaviorally close, and the bandwidth <span class="m">\(\ell\)</span> sets how far this interaction reaches. Diversity comes from interactions among a fixed number of members rather than from archive cells.</p>
+
+  <p><strong>Population gradients are shaped rewards.</strong> Behavior cannot be differentiated through the environment. But when a descriptor is the expected sum of a per-step behavior signal <span class="m">\(m\)</span>, <span class="m">\(b(\theta) = \mathbb{E}\big[\sum_t \gamma^t m(s_t,a_t)\big]\)</span>, it has the same form as a return. Changing a policy's behavior in a direction <span class="m">\(v\)</span> is then an ordinary policy gradient with reward <span class="m">\(v^{\top} m\)</span>. Differentiating <span class="m">\(S\)</span> gives each policy a direction that points away from its nearby high-quality neighbors. RePPO computes this direction <span class="m">\(p_k\)</span> from smoothed episode statistics, with a few stabilizers described in the paper. Each policy's shaped reward is</p>
+  <div class="m">\[
+    \tilde r_k(s,a) \;=\; r(s,a) \;+\; p_k^{\top} m(s,a).
+  \]</div>
+
+  <p><strong>Then each member runs ordinary PPO.</strong> Each policy has a task critic and a behavior critic. Their advantages are combined with the weights <span class="m">\(p_k\)</span> and fed to the usual clipped PPO update. One iteration:</p>
+  <ol class="steps">
+    <li>Collect on-policy rollouts for all <em>N</em> policies, recording task and behavior signals.</li>
+    <li>Update each policy's smoothed return and descriptor, and compute <span class="m">\(p_k\)</span> from the current population.</li>
+    <li>Run PPO epochs for each policy with <span class="m">\(p_k\)</span> held fixed.</li>
+  </ol>
+  <p>Setting <span class="m">\(p_k = 0\)</span> recovers <em>N</em> independent PPO runs, which we call <strong>Ind-PPO</strong>.</p>
+</section>
+
+<section class="col" id="results">
+  <h2>Results</h2>
+  <p>We describe a population with two numbers. Its <strong>mean fitness</strong> (average return) measures quality. The <strong>Vendi Score</strong> of its descriptors measures diversity and can be read as the effective number of distinct behaviors. Their product, the quality-weighted Vendi Score (<strong>qVS</strong>), summarizes both. All numbers are computed after filtering out policies that fail at the task. Throughout, <span class="key" style="background:var(--accent)"></span>blue is RePPO and <span class="key" style="background:var(--indppo)"></span>green is Ind-PPO.</p>
+
+  <h3>Continuous control</h3>
+  <p>On four Brax locomotion tasks, we compare RePPO with Ind-PPO and four archive-based QD-RL methods. <strong>RePPO attains the highest qVS on all four tasks.</strong> Ind-PPO finds strong policies that all behave alike. The archive-based methods cover behavior space, but most of their policies are weak. RePPO gets both quality and diversity.</p>
+</section>
+<figure class="wide scroll">
+  <div class="frame"><img src="assets/fig/qd_control.webp" alt="Four scatter plots, one per Brax task, of mean fitness against Vendi Score for RePPO, DCRL-ME, PPGA, PGA-ME, Sep-CMA-MAE and Ind-PPO. RePPO lies furthest up and to the right of the constant-qVS curves on every task." width="2000" height="505"></div>
+  <figcaption><b>Figure 3.</b> Quality (mean fitness) against diversity (Vendi Score) of the final populations. Large markers are means over seeds, faint dots are individual runs, and gray curves are levels of constant qVS. Up and to the right is better.</figcaption>
+</figure>
+<section class="col">
+  <p>Repulsion costs some mean fitness relative to Ind-PPO. The <em>best</em> policy of each RePPO population, however, stays close to the best Ind-PPO policy.</p>
+
+  <h3>Atari from pixels</h3>
+  <p>In four Atari games, RePPO and Ind-PPO train populations of 8 policies from pixels. Descriptors record where the agent plays or how it approaches the game. Archives of such large policies are costly, so the QD baseline here is RefQD, which shares one network body across its archive. <strong>RePPO keeps scores close to Ind-PPO's in every game while being more diverse than both baselines.</strong> RefQD's policies score far lower.</p>
+</section>
+<figure class="wide scroll">
+  <div class="frame"><img src="assets/fig/qd_atari.webp" alt="Four scatter plots, one per Atari game, of mean score against Vendi Score for RePPO, RefQD and Ind-PPO. RePPO matches Ind-PPO's score at a higher Vendi Score; RefQD scores far lower." width="2000" height="564"></div>
+  <figcaption><b>Figure 4.</b> The same plot for the four Atari games.</figcaption>
+</figure>
+<section class="col">
+  <p>Diversity can also uncover strategies that independent training misses. In Seaquest, Ind-PPO and RefQD policies stay near the sea floor. Repulsion pushes some RePPO policies toward shallower water. <strong>In four of five seeds, the best RePPO policy operates just below the surface and outscores every Ind-PPO policy.</strong></p>
+</section>
+<figure class="narrow">
+  <img src="assets/fig/seaquest.webp" alt="Scatter plot of Seaquest score against mean depth for every policy. Ind-PPO and RefQD policies cluster near the sea floor; RePPO policies spread across depths, and the circled best policies of four RePPO seeds sit just below the surface with the highest scores." width="1400" height="610">
+  <figcaption><b>Figure 5.</b> Score and mean depth of every competent Seaquest policy, with the best policy of each seed circled.</figcaption>
+</figure>
+
+<section class="col">
+  <h3>Fine-tuning language models</h3>
+  <p>Finally, we fine-tune Qwen3-1.7B-Base and Granite-4.1-3B-Base on MATH problems with a correctness reward. Each population has 5 members, and each member is a LoRA adapter on a shared frozen model. Four descriptors capture how a solution is written: its use of Python code, self-verification, LaTeX symbols and markdown. To our knowledge, this is the first application of QD-RL to language-model fine-tuning.</p>
+  <p><strong>RePPO's members develop distinct writing styles while nearly matching the accuracy of independent training.</strong> A simple classifier can tell which member wrote a solution about 80% of the time, against 20% by chance. Asking the base model for different styles through prompting changes its outputs far less and costs much more accuracy.</p>
+
+  <table>
+    <thead><tr><th>Method</th><th>pass@1</th><th>Vendi</th><th>Identifiability</th></tr></thead>
+    <tbody>
+      <tr class="group"><td colspan="4">Qwen3-1.7B</td></tr>
+      <tr><td>Base model</td><td>0.320</td><td>–</td><td>–</td></tr>
+      <tr><td>Prompt (corners)</td><td>0.274</td><td>1.11</td><td>51%</td></tr>
+      <tr><td>Prompt (emphasis)</td><td>0.275</td><td>1.08</td><td>44%</td></tr>
+      <tr><td>Ind-PPO</td><td>0.423</td><td>1.04</td><td>41%</td></tr>
+      <tr class="hl"><td>RePPO</td><td>0.413</td><td>1.85</td><td>82%</td></tr>
+      <tr class="group"><td colspan="4">Granite-4.1-3B</td></tr>
+      <tr><td>Base model</td><td>0.233</td><td>–</td><td>–</td></tr>
+      <tr><td>Prompt (corners)</td><td>0.163</td><td>1.01</td><td>31%</td></tr>
+      <tr><td>Prompt (emphasis)</td><td>0.194</td><td>1.03</td><td>37%</td></tr>
+      <tr><td>Ind-PPO</td><td>0.560</td><td>1.03</td><td>53%</td></tr>
+      <tr class="hl"><td>RePPO</td><td>0.550</td><td>2.57</td><td>81%</td></tr>
+    </tbody>
+  </table>
+  <p class="tabcap"><b>Table 1.</b> Populations on the test problems (MATH-500, Minerva, OlympiadBench). Vendi is the Vendi Score of the members' mean descriptors. Identifiability is the accuracy of a classifier that names a solution's author from its text.</p>
+</section>
+<figure class="narrow">
+  <img src="assets/fig/llm_styles.webp" alt="Heatmaps of the mean descriptor of each of five members per method and model, with pass@1 alongside. Ind-PPO rows are nearly identical; RePPO rows differ strongly in code, verification, symbols and markdown while pass@1 stays similar." width="1400" height="799">
+  <figcaption><b>Figure 6.</b> Mean descriptor of each member, relative to the base model, with pass@1 in the gray column. Ind-PPO's members are nearly identical, while each RePPO member settles on its own style.</figcaption>
+</figure>
+<section class="col">
+  <p>The two solutions below come from two Qwen3 RePPO members on the same problem. Both follow the same strategy and differ only in presentation.</p>
+  <div class="pair" id="pair">
+    <div class="sol">
+      <p class="hd">RePPO · Member 1 <span class="small">— correct, 290 tokens</span></p>
+      <p class="desc">code −0.19 · verification −0.18 · symbols −0.74 · markdown −0.89</p>
+      <p>To solve the problem, we can treat the two boys as a single “block” or “unit”. This means we have 7 units to arrange: the block of 2 boys and the 6 girls. The number of ways to arrange these 7 units is 7! (7 factorial).</p>
+      <p>After arranging the 7 units, the 2 boys within their block can switch places. There are 2! (2 factorial) ways to arrange the boys within their block.</p>
+      <p>Therefore, the total number of ways to arrange the 6 girls and 2 boys such that the 2 boys sit next to each other is:</p>
+      <p>7! × 2!</p>
+      <p>Calculating 7!:</p>
+      <p>7! = 7 × 6 × 5 × 4 × 3 × 2 × 1 = 5040</p>
+      <p>Calculating 2!:</p>
+      <p>2! = 2 × 1 = 2</p>
+      <p>Multiplying these together gives:</p>
+      <p>7! × 2! = 5040 × 2 = 10080</p>
+      <p>Thus, the number of ways the 6 girls and 2 boys can sit in a row if the 2 boys insist on sitting next to each other is:</p>
+      <p><span class="boxed">10080</span></p>
+    </div>
+    <div class="sol">
+      <p class="hd">RePPO · Member 3 <span class="small">— correct, 388 tokens</span></p>
+      <p class="desc">code +0.99 · verification −0.18 · symbols −0.86 · markdown +0.19</p>
+      <p>To solve this problem, we need to consider the boys as a single “block” since they insist on sitting next to each other. This means we can treat the two boys as one unit, and then we need to arrange this block along with the 6 girls.</p>
+      <p>Here’s the step-by-step reasoning:</p>
+      <p>1. Treat the two boys as a single unit. This means we now have 7 units to arrange: the block of two boys and the 6 girls.<br>2. The number of ways to arrange these 7 units is 7! (7 factorial), which is 7 × 6 × 5 × 4 × 3 × 2 × 1 = 5040.<br>3. Within the block, the two boys can switch places, so there are 2! (2 factorial) ways to arrange the two boys within their block, which is 2 × 1 = 2.</p>
+      <p>So the total number of arrangements is 7! × 2! = 5040 × 2 = 10080.</p>
+      <p>Let’s confirm this with Python code.</p>
+<pre>import math
+# Number of ways to arrange 7 units (1 block of 2 boys and 6 girls)
+arrangements_of_units = math.factorial(7)
+# Number of ways to arrange the 2 boys within their block
+arrangements_within_block = math.factorial(2)
+# Total number of arrangements
+total_arrangements = arrangements_of_units * arrangements_within_block
+print(total_arrangements)</pre>
+<pre>10080</pre>
+      <p>The total number of ways to arrange 6 girls and 2 boys in a row, with the 2 boys insisting on sitting next to each other, is <span class="boxed">10080</span>.</p>
+    </div>
+  </div>
+  <p class="expand"><button type="button" id="expandpair" aria-expanded="false" aria-controls="pair">Show full solutions</button></p>
+  <p class="small">Problem: <em>In how many ways can 6 girls and 2 boys sit in a row if the 2 boys insist on sitting next to each other?</em> (answer 10,080). Each box's header gives the solution's four descriptors. The “output” block after the code is written by the model itself, since no interpreter is available.</p>
+
+  <p>The appendix of the <a href="https://arxiv.org/abs/2610.36425">paper</a> shows more domains, including locomotion from pixels and LunarLander.</p>
+</section>
+
+<section class="col" id="cmax">
+  <h2>The quality–diversity knob</h2>
+  <p>The repulsion cap <span class="m">\(C_{\max}\)</span> sets how strongly diversity enters each update, and <span class="m">\(C_{\max} = 0\)</span> recovers Ind-PPO. Up to the default of 1, raising it buys diversity at little cost. Beyond that, diversity saturates and fitness starts to drop.</p>
+</section>
+<figure class="narrow">
+  <img src="assets/fig/cmax.webp" alt="Two line plots over the repulsion cap C_max from 0.1 to 8 on Humanoid: mean and best fitness (left) stay flat up to about 1 and then decline; Vendi Score (right) rises steeply from 3.9 and saturates near 6.7." width="1400" height="595">
+  <figcaption><b>Figure 7.</b> Fitness (left) and diversity (right) on Humanoid as the repulsion cap grows. The dotted line marks the default.</figcaption>
+</figure>
+
+<section class="col" id="takeaways">
+  <h2>When to use RePPO</h2>
+  <ul class="plain">
+    <li><strong>You already train with PPO.</strong> RePPO adds a behavior critic and a weight vector <span class="m">\(p_k\)</span> per policy. Rollouts and the PPO update stay the same. The cost grows with the population size, not with the size of an archive.</li>
+    <li><strong>You can write a per-step behavior signal.</strong> Foot contacts, screen position, or features of a finished text all work, as long as the descriptor is the expected sum of such a signal. Sparse signals that arrive only at the end of an episode also work.</li>
+    <li><strong>You want a handful of strong, distinct policies</strong>, not exhaustive coverage of behavior space. For dense coverage with thousands of cells, archive-based methods remain better suited.</li>
+  </ul>
+</section>
+
+<section class="col" id="bibtex">
+  <h2>Citation</h2>
+  <div class="bib">
+    <button type="button" id="copybib">Copy</button>
+<pre id="bibtext">@article{hedayatian2026reppo,
+  title   = {Repulsive Population Policy Gradients for Behaviorally Diverse Reinforcement Learning},
+  author  = {Hedayatian, Saeed and Shah, Harsh and Mneimneh, Celine and Nikolaidis, Stefanos},
+  journal = {arXiv preprint arXiv:2610.36425},
+  year    = {2026},
+  eprint  = {2610.36425},
+  archivePrefix = {arXiv}
+}</pre>
+  </div>
+</section>
+
+
+</main>
+
+<script>
+  // Task switcher for the clip gallery.
+  (function () {
+    var tabs = document.querySelectorAll('.tabs button');
+    var groups = document.querySelectorAll('.task');
+    function show(task) {
+      tabs.forEach(function (b) { b.setAttribute('aria-selected', b.dataset.task === task ? 'true' : 'false'); });
+      groups.forEach(function (g) {
+        var on = g.dataset.task === task;
+        g.hidden = !on;
+        g.querySelectorAll('video').forEach(function (v) {
+          if (on) { v.preload = 'auto'; var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+          else { v.pause(); }
+        });
+      });
+    }
+    tabs.forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.task); }); });
+  })();
+
+  // BibTeX copy button.
+  (function () {
+    var btn = document.getElementById('copybib');
+    btn.addEventListener('click', function () {
+      var text = document.getElementById('bibtext').textContent;
+      function done() { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); }
+      if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done, done); } else { done(); }
+    });
+  })();
+
+  // Expand the side-by-side solutions.
+  (function () {
+    var btn = document.getElementById('expandpair'), pair = document.getElementById('pair');
+    btn.addEventListener('click', function () {
+      var open = pair.classList.toggle('open');
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.textContent = open ? 'Collapse solutions' : 'Show full solutions';
+    });
+  })();
+
+  // KaTeX.
+  document.addEventListener('DOMContentLoaded', function () {
+    if (window.renderMathInElement) {
+      renderMathInElement(document.body, {
+        delimiters: [{ left: '\\[', right: '\\]', display: true }, { left: '\\(', right: '\\)', display: false }],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>
